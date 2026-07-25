@@ -44,7 +44,7 @@ def test_valid_token_passes_auth(client, valid_user):
         resp = client.get(
             "/workbench/", headers={"Authorization": "Bearer valid.token"}
         )
-    # Upstream is unreachable — gateway returns a 200 with error body, NOT 401.
+    # Upstream is unreachable — gateway returns a 500 with error body, NOT 401.
     assert resp.status_code != 401
 
 

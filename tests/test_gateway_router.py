@@ -4,8 +4,8 @@ Tests for the gateway catch-all route (app/routes/gateway.py).
 Route pattern: /{service}/{path:path}
 resolve_service() maps service slug → upstream URL.
 Unknown service → {"error": "unknown service"} with HTTP 200.
-Known service → proxy attempt (upstream unreachable in tests → HTTP 200 with
-                upstream_failure body, not a 4xx from the gateway itself).
+Known service → proxy attempt (upstream unreachable in tests → HTTP 500 with
+                upstream_failure body, propagating the real upstream status).
 """
 from unittest.mock import AsyncMock, patch
 
@@ -77,5 +77,7 @@ def test_gateway_audit_emit_exception_silenced(client, valid_user):
         resp = client.get(
             "/workbench/ping", headers={"Authorization": "Bearer token"}
         )
-    # Exception must be swallowed — response still arrives
-    assert resp.status_code == 200
+    # Exception must be swallowed — response still arrives, carrying the real
+    # upstream status (500, since workbench is unreachable in tests), not a
+    # 200 masking the failure.
+    assert resp.status_code == 500

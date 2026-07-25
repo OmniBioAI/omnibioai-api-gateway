@@ -1,6 +1,7 @@
 import asyncio
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from app.core.router import resolve_service
 from app.core.proxy import ProxyClient
@@ -59,4 +60,4 @@ async def gateway(service: str, path: str, request: Request):
     except Exception:
         pass
 
-    return {"status": status, "data": response}
+    return JSONResponse(content=response, status_code=status)
