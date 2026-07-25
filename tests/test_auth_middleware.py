@@ -44,7 +44,8 @@ def test_valid_token_passes_auth(client, valid_user):
         resp = client.get(
             "/workbench/", headers={"Authorization": "Bearer valid.token"}
         )
-    # Upstream is unreachable — gateway returns a 500 with error body, NOT 401.
+    # ProxyClient.forward() is mocked to a default success in conftest — the
+    # point here is only that auth passed, i.e. status must not be 401.
     assert resp.status_code != 401
 
 

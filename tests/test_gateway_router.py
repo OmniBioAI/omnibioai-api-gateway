@@ -4,8 +4,12 @@ Tests for the gateway catch-all route (app/routes/gateway.py).
 Route pattern: /{service}/{path:path}
 resolve_service() maps service slug → upstream URL.
 Unknown service → {"error": "unknown service"} with HTTP 200.
-Known service → proxy attempt (upstream unreachable in tests → HTTP 500 with
-                upstream_failure body, propagating the real upstream status).
+Known service → proxy attempt. ProxyClient.forward() is mocked (see
+                conftest._isolate_external_io) to a deterministic success by
+                default, so these tests never make real network calls; tests
+                that need failure behavior override the mock themselves and
+                assert the gateway now propagates the real upstream status
+                code instead of always returning 200.
 """
 from unittest.mock import AsyncMock, patch
 
@@ -72,12 +76,15 @@ def test_gateway_audit_emit_exception_silenced(client, valid_user):
         patch.object(
             _main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})
         ),
+        patch(
+            "app.routes.gateway.proxy.forward",
+            AsyncMock(return_value=(500, {"error": "upstream_failure", "detail": "connection refused"})),
+        ),
         patch("app.routes.gateway.asyncio.create_task", side_effect=RuntimeError("no loop")),
     ):
         resp = client.get(
             "/workbench/ping", headers={"Authorization": "Bearer token"}
         )
     # Exception must be swallowed — response still arrives, carrying the real
-    # upstream status (500, since workbench is unreachable in tests), not a
-    # 200 masking the failure.
+    # upstream status (500 here) rather than a 200 masking the failure.
     assert resp.status_code == 500
