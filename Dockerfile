@@ -9,11 +9,6 @@ WORKDIR /app
 # Build context is the parent directory (/home/manish/Desktop/machine)
 # so sibling repos are accessible during the build.
 
-# Install IAM client SDK from source, then discard the source tree.
-COPY omnibioai-iam-client /tmp/omnibioai-iam-client
-RUN pip install --no-cache-dir /tmp/omnibioai-iam-client \
- && rm -rf /tmp/omnibioai-iam-client
-
 # Install gateway Python dependencies.
 COPY omnibioai-api-gateway/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
