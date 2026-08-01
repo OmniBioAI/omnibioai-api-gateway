@@ -59,6 +59,20 @@ class IAMClient:
                     "email": data.get("email", ""),
                     "roles": data.get("roles", []),
                     "permissions": data.get("permissions", []),
+                    # Phase 1 PR3 -- additive. schema_version distinguishes
+                    # "this response predates org context" (absent/1) from
+                    # "org_id is genuinely null because this user has no
+                    # org membership yet" (2, org_id=None) -- both are
+                    # valid states, not errors. A cache entry written by a
+                    # pre-PR3 gateway process (before this field existed)
+                    # is read back the same way via _get_cached's raw
+                    # json.loads -- callers reading .get("org_id") on that
+                    # dict get None either way, so no special-case handling
+                    # is needed for old cache entries, only for the shape
+                    # of what a *new* validate() call writes.
+                    "org_id": data.get("org_id"),
+                    "org_role": data.get("org_role", []),
+                    "schema_version": data.get("schema_version", 1),
                     "valid": True,
                 }
                 await self._set_cached(token, user)

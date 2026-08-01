@@ -108,6 +108,81 @@ async def test_validate_remote_valid_returns_user(iam_client):
     assert result["valid"] is True
 
 
+async def test_validate_remote_propagates_org_context(iam_client):
+    """Phase 1 PR3: a fresh /auth/validate response carrying org_id/
+    org_role/schema_version must actually end up in the cached user dict,
+    not be silently dropped the way the old 5-field reconstruction would
+    have done."""
+    client, mock_redis, mock_http = iam_client
+    mock_redis.get.return_value = None
+    resp = MagicMock()
+    resp.json.return_value = {
+        "valid": True,
+        "user_id": "99",
+        "email": "u@test.com",
+        "roles": ["admin"],
+        "permissions": ["write"],
+        "org_id": 7,
+        "org_role": ["org_admin"],
+        "schema_version": 2,
+    }
+    mock_http.post.return_value = resp
+    result = await client.validate("tok")
+    assert result["org_id"] == 7
+    assert result["org_role"] == ["org_admin"]
+    assert result["schema_version"] == 2
+
+
+async def test_validate_remote_defaults_org_context_when_absent(iam_client):
+    """A /auth/validate response with none of the PR3 fields (e.g. served
+    by an auth-service instance mid-rolling-deploy that hasn't picked up
+    this change yet) must still produce a usable user dict with sensible
+    defaults, not a KeyError."""
+    client, mock_redis, mock_http = iam_client
+    mock_redis.get.return_value = None
+    resp = MagicMock()
+    resp.json.return_value = {
+        "valid": True,
+        "user_id": "42",
+        "email": "old@test.com",
+        "roles": ["user"],
+        "permissions": [],
+    }
+    mock_http.post.return_value = resp
+    result = await client.validate("tok")
+    assert result["org_id"] is None
+    assert result["org_role"] == []
+    assert result["schema_version"] == 1
+
+
+async def test_validate_cache_hit_with_pre_pr3_shaped_entry(iam_client):
+    """Redis mixed-version cache compatibility: a cache entry written by a
+    gateway process running BEFORE this change (no org_id/org_role/
+    schema_version keys at all in the stored JSON, not even null values)
+    must still be read back and used successfully -- this is the actual
+    scenario during a rolling deploy, where old and new gateway instances'
+    cache writes coexist in the same Redis for up to the 300s TTL."""
+    client, mock_redis, mock_http = iam_client
+    pre_pr3_cached_entry = {
+        "user_id": "7",
+        "email": "u@test.com",
+        "roles": ["admin"],
+        "permissions": ["write"],
+        "valid": True,
+    }
+    mock_redis.get.return_value = json.dumps(pre_pr3_cached_entry)
+
+    result = await client.validate("tok")
+
+    assert result == pre_pr3_cached_entry  # returned as-is, cache hit skips remote entirely
+    mock_http.post.assert_not_called()
+    # Downstream code reading org context off a cache-hit result must use
+    # .get() with a default -- this dict genuinely has no org_id key at
+    # all, distinguishing it from a fresh v2 response where org_id is
+    # explicitly present as None.
+    assert pre_pr3_cached_entry.get("org_id") is None
+
+
 async def test_validate_remote_invalid_evicts_and_returns_none(iam_client):
     client, mock_redis, mock_http = iam_client
     mock_redis.get.return_value = None
