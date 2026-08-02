@@ -31,7 +31,7 @@ PolicyMiddleware         ← RBAC/ABAC via policy-engine
 
 ↓
 
-HPCMiddleware            ← GPU/CPU quota via hpc-policy-engine
+HPCMiddleware            ← GPU/CPU quota via hpc-policy-engine (compute paths only)
 
 ↓
 
@@ -39,7 +39,7 @@ AuditMiddleware          ← async audit log via security-audit
 
 ↓
 
-target service           ← workbench / tes / toolserver / rag / lims
+target service           ← workbench / tes / toolserver / model-registry / rag
 ```
 
 **Failure policy:**
@@ -53,13 +53,99 @@ target service           ← workbench / tes / toolserver / rag / lims
 
 ---
 
+## Authentication Pipeline
+
+Every request that isn't `/health` or `/` passes through this exact chain
+(`app/main.py`; middleware is registered LIFO, so `TraceMiddleware` —
+added last — runs first):
+
+```
+Incoming JWT
+      │   Authorization: Bearer <jwt>
+      ▼
+IAM validation      AuthMiddleware → IAMClient.validate(token)
+      │              — Redis-cached (key "iam:{token}", TTL 300s) first,
+      │                else POST {IAM_URL}/auth/validate (1 retry on timeout)
+      │              — no token or a rejected token → 401, fail closed
+      ▼
+Policy               PolicyMiddleware → PolicyClient.evaluate(...)
+      │              — POSTs user_id/email/roles/permissions/action/resource
+      │                to {POLICY_URL}/policy/evaluate
+      │              — deny → 403, fail closed
+      │              (HPCMiddleware runs next, compute paths only —
+      │               GPU/CPU quota via {HPC_URL}/jobs/evaluate, also
+      │               fail-closed)
+      ▼
+Forward Authorization header
+      │              gateway.py rebuilds the outgoing header set from
+      │                scratch (never re-forwards the raw incoming
+      │                "authorization" key) and sets
+      │                Authorization: Bearer <token> from
+      │                request.state.token — the exact string
+      │                AuthMiddleware already validated, not a re-parse
+      │                of the original header — so the backend service
+      │                can independently re-verify identity itself.
+      ▼
+Backend services     proxy.forward() to the resolved SERVICE_MAP target
+                       (workbench / tes / toolserver / model-registry / rag)
+```
+
+The gateway never decodes a JWT itself — no local HS256/RS256 verification,
+no JWKS client. Every validation is a remote call to auth-service's
+`/auth/validate` (Redis-cached), delegating entirely to the shared identity
+layer described in [omnibioai-auth's README](../omnibioai-auth#jwt) rather
+than duplicating its verification logic.
+
+### Identity propagation
+
+Alongside the re-forwarded `Authorization` header, the gateway also injects:
+
+| Header | Value | Notes |
+|--------|-------|-------|
+| `X-User-Id` | The authenticated user's ID | **Unsigned** — a convenience header for services that don't want to re-decode the JWT; the re-forwarded `Authorization` bearer token is the only header a backend should actually trust for authorization decisions |
+| `X-Internal-Service` | `gateway` | Marks the request as gateway-verified/internal |
+
+`org_id`/`org_role` are resolved into `request.state.user` during IAM
+validation but are **not** propagated as their own headers today — a
+backend that needs them re-derives them from the forwarded JWT itself
+(`/auth/validate` or a local `jwt_verify.py`, same as Control Center and
+Security Audit do).
+
+### Authorization forwarding
+
+See "Forward Authorization header" in the pipeline above — this is not a
+service-to-service token, it is the caller's own validated bearer token,
+forwarded as-is so the backend service can verify it independently rather
+than trusting the gateway's decision blindly.
+
+### Trace IDs
+
+`TraceMiddleware` (outermost — runs first) generates or echoes an
+`X-Trace-Id` UUID, attaches it to `request.state.trace_id`, sets it on the
+response, and it's propagated on to the backend request. Every
+middleware's own audit events (auth/policy/HPC denials, the final
+upstream-forward event) carry this same trace ID, so a single request can
+be followed end-to-end through the audit stream.
+
+### Service identity
+
+There is currently no separate service-to-service credential (no service
+JWT, no mTLS, no API key) — the gateway calls backend services carrying
+only the unsigned `X-Internal-Service: gateway` marker plus the forwarded
+user bearer token. Backend-to-backend trust within the compose network is
+not independently authenticated at the gateway layer; each backend service
+is expected to validate the forwarded JWT itself if it needs a real
+identity guarantee.
+
+---
+
 ## Features
 
 - JWT authentication via IAM client (Redis-cached, sub-ms validation)
 - RBAC/ABAC policy enforcement on every request
 - GPU/CPU quota governance for compute requests
 - Async audit logging via Redis Streams (never blocks requests)
-- Service-to-service (S2S) token validation
+- Original bearer-token forwarding to backend services (see [Authentication Pipeline](#authentication-pipeline))
 - Distributed trace ID propagation (X-Trace-Id header)
 - Redis pub/sub cache invalidation on logout
 - Rate limiting on auth endpoints (via nginx — 10 req/min, burst 5)
@@ -86,7 +172,7 @@ Middleware is applied LIFO — last added runs first for requests:
 |----------|--------|------|-------------|
 | `/health` | GET | — | Gateway health check |
 | `/auth/verify` | GET | JWT | Verify token (used by nginx auth_request) |
-| `/api/*` | ALL | JWT | Proxy to target service |
+| `/{service}/{path}` | GET/POST/PUT/DELETE | JWT | Proxy to target service — no `/api` prefix |
 
 ### Health check
 ```bash
@@ -97,21 +183,23 @@ curl http://localhost:8080/health
 ### All other requests require JWT
 ```bash
 curl -H "Authorization: Bearer <token>" \
-  http://localhost:8080/api/tools
+  http://localhost:8080/tes/jobs
 ```
 
 ---
 
 ## Service Routing
 
-| Path prefix | Target service |
-|-------------|----------------|
-| `/api/workbench/*` | workbench :8000 |
-| `/api/tes/*` | tes :8081 |
-| `/api/tools/*` | toolserver :9090 |
-| `/api/models/*` | model-registry :8095 |
-| `/api/rag/*` | rag :8096 |
-| `/api/lims/*` | lims :7000 |
+| Path | Target service |
+|------|-----------------|
+| `/workbench/*` | workbench :8000 |
+| `/tes/*` | tes :8081 |
+| `/toolserver/*` | toolserver :9090 |
+| `/model-registry/*` | model-registry :8095 |
+| `/rag/*` | rag :8096 |
+
+LIMS is not proxied through this gateway's `SERVICE_MAP` — it's reached
+via a separate route.
 
 ---
 
@@ -119,8 +207,9 @@ curl -H "Authorization: Bearer <token>" \
 
 | Header | Description |
 |--------|-------------|
+| `Authorization` | The caller's original bearer token, re-forwarded verbatim (see [Authentication Pipeline](#authentication-pipeline)) |
 | `X-Trace-Id` | UUID per request for distributed tracing |
-| `X-User-Id` | Authenticated user ID |
+| `X-User-Id` | Authenticated user ID (unsigned convenience header) |
 | `X-Internal-Service` | Marks request as internal (gateway-verified) |
 
 ---
