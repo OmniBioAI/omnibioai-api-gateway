@@ -1,5 +1,7 @@
 """Tests for app/services/audit_client.py and app/middleware/audit.py audit_log."""
 import asyncio
+import uuid
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 
@@ -70,3 +72,110 @@ async def test_emit_xadd_error_silenced():
         await audit_client._emit({"event": "e1"})  # must not raise
     finally:
         audit_client._redis = original
+
+
+# ---------------------------------------------------------------------------
+# PR4.5: build_audit_event -- the single audit-event contract every
+# producer in this repo must build its payload through.
+# ---------------------------------------------------------------------------
+
+def test_build_audit_event_contains_all_contract_fields():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(service="gateway", event_type="request")
+
+    assert set(event.keys()) == {
+        "event_id", "timestamp", "service", "event_type", "user_id",
+        "action", "resource", "decision", "reason", "trace_id", "context",
+    }
+
+
+def test_build_audit_event_generates_unique_event_id_per_call():
+    """Each call must mint its own event_id -- this is what keeps a
+    retried/redelivered Redis message's identity stable across a *single*
+    emission while still being distinct from every other real event."""
+    from app.services.audit_client import build_audit_event
+
+    e1 = build_audit_event(service="gateway", event_type="request")
+    e2 = build_audit_event(service="gateway", event_type="request")
+
+    assert e1["event_id"] != e2["event_id"]
+    uuid.UUID(e1["event_id"])  # raises ValueError if not a valid UUID
+
+
+def test_build_audit_event_timestamp_is_iso8601():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(service="gateway", event_type="request")
+
+    # Must round-trip through fromisoformat without raising.
+    datetime.fromisoformat(event["timestamp"])
+
+
+def test_build_audit_event_required_fields_set():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(service="gateway", event_type="policy_denied")
+
+    assert event["service"] == "gateway"
+    assert event["event_type"] == "policy_denied"
+
+
+def test_build_audit_event_optional_fields_default_none_or_empty():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(service="gateway", event_type="request")
+
+    assert event["user_id"] is None
+    assert event["action"] == ""
+    assert event["resource"] is None
+    assert event["decision"] is None
+    assert event["reason"] is None
+    assert event["trace_id"] is None
+    assert event["context"] == {}
+
+
+def test_build_audit_event_passes_through_all_optional_fields():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(
+        service="gateway",
+        event_type="policy_denied",
+        action="GET /workbench/run",
+        user_id="u1",
+        resource="workbench",
+        decision="deny",
+        reason="no_permission",
+        trace_id="trace-abc",
+        context={"extra": "data"},
+    )
+
+    assert event["action"] == "GET /workbench/run"
+    assert event["user_id"] == "u1"
+    assert event["resource"] == "workbench"
+    assert event["decision"] == "deny"
+    assert event["reason"] == "no_permission"
+    assert event["trace_id"] == "trace-abc"
+    assert event["context"] == {"extra": "data"}
+
+
+def test_build_audit_event_context_none_becomes_empty_dict():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(service="gateway", event_type="request", context=None)
+
+    assert event["context"] == {}
+
+
+def test_build_audit_event_context_defaults_are_independent_dicts():
+    """Guards against a mutable-default-argument bug (the exact class of
+    bug PR4.1 fixed for AuditEvent.event_id/timestamp in the other repo):
+    two calls that both omit `context` must not end up sharing the same
+    dict object."""
+    from app.services.audit_client import build_audit_event
+
+    e1 = build_audit_event(service="gateway", event_type="request")
+    e2 = build_audit_event(service="gateway", event_type="request")
+
+    e1["context"]["leaked"] = True
+    assert "leaked" not in e2["context"]

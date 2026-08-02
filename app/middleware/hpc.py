@@ -2,7 +2,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from app.services.hpc_policy_client import HPCPolicyClient
-from app.services.audit_client import fire_audit
+from app.services.audit_client import build_audit_event, fire_audit
 
 _SKIP_PATHS = {"/health", "/"}
 
@@ -33,15 +33,15 @@ class HPCMiddleware(BaseHTTPMiddleware):
         )
 
         if not decision.get("allow", False):
-            fire_audit({
-                "service": "gateway",
-                "event_type": "hpc_denied",
-                "user_id": user_id,
-                "action": f"{request.method} {request.url.path}",
-                "decision": "deny",
-                "reason": decision.get("reason", "hpc_quota_exceeded"),
-                "trace_id": trace_id,
-            })
+            fire_audit(build_audit_event(
+                service="gateway",
+                event_type="hpc_denied",
+                user_id=user_id,
+                action=f"{request.method} {request.url.path}",
+                decision="deny",
+                reason=decision.get("reason", "hpc_quota_exceeded"),
+                trace_id=trace_id,
+            ))
             return JSONResponse(
                 {"error": "HPC quota exceeded", "reason": decision.get("reason")},
                 status_code=403,

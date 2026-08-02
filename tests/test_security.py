@@ -40,7 +40,14 @@ async def test_attach_trace_sets_state_and_returns_trace_id():
     assert request.state.trace_id == trace_id
     mock_audit.assert_called_once()
     event = mock_audit.call_args[0][0]
-    assert event["event"] == "trace_created"
+    # PR4.5: shape is now the shared AuditEvent contract (build_audit_event)
+    # rather than the old {"event": ..., "path": ..., "method": ...} --
+    # which had no service/event_type at all and would have failed
+    # AuditEvent validation outright.
+    assert event["service"] == "gateway"
+    assert event["event_type"] == "trace_created"
     assert event["trace_id"] == trace_id
-    assert event["path"] == "/workbench/run"
-    assert event["method"] == "POST"
+    assert event["action"] == "POST /workbench/run"
+    assert event["context"] == {"path": "/workbench/run", "method": "POST"}
+    assert event["event_id"]
+    assert event["timestamp"]
