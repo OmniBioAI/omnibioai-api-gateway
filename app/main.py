@@ -14,6 +14,7 @@ from app.services.iam_client import IAMClient
 from app.services.policy_client import PolicyClient
 from app.services.hpc_policy_client import HPCPolicyClient
 
+from app.routes.auth_verify import router as auth_verify_router
 from app.routes.gateway import router
 
 iam = IAMClient(Config.IAM_URL, Config.REDIS_URL)
@@ -65,6 +66,12 @@ app.add_middleware(PolicyMiddleware, policy=policy)
 app.add_middleware(AuthMiddleware, iam=iam)
 app.add_middleware(TraceMiddleware)
 
+
+# Registered BEFORE the catch-all gateway router: Starlette matches routes
+# in registration order, and /auth/verify (2 path segments) would
+# otherwise be shadowed by gateway's own /{service}/{path:path} pattern
+# (service="auth", path="verify").
+app.include_router(auth_verify_router)
 app.include_router(router)
 
 

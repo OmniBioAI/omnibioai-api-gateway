@@ -88,3 +88,107 @@ def test_gateway_audit_emit_exception_silenced(client, valid_user):
     # Exception must be swallowed — response still arrives, carrying the real
     # upstream status (500 here) rather than a 200 masking the failure.
     assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# SSO Phase 2 PR4: signed identity propagation (Authorization forwarded
+# downstream alongside the existing X-User-Id/X-Trace-Id/X-Internal-Service).
+# ---------------------------------------------------------------------------
+
+def test_authenticated_request_forwards_authorization_header(client, valid_user):
+    mock_forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", mock_forward),
+    ):
+        client.get("/workbench/ping", headers={"Authorization": "Bearer original-jwt-value"})
+
+    headers = mock_forward.call_args.kwargs["headers"]
+    assert "Authorization" in headers
+
+
+def test_forwarded_jwt_value_is_unchanged(client, valid_user):
+    """The exact token string the client sent (and AuthMiddleware already
+    validated) must reach the upstream call unmodified."""
+    mock_forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", mock_forward),
+    ):
+        client.get("/workbench/ping", headers={"Authorization": "Bearer original-jwt-value"})
+
+    headers = mock_forward.call_args.kwargs["headers"]
+    assert headers["Authorization"] == "Bearer original-jwt-value"
+
+
+def test_no_duplicate_authorization_header_keys(client, valid_user):
+    """Only one Authorization entry must reach the upstream call -- not
+    both a lowercase passthrough copy and the explicit canonical one."""
+    mock_forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", mock_forward),
+    ):
+        client.get("/workbench/ping", headers={"Authorization": "Bearer original-jwt-value"})
+
+    headers = mock_forward.call_args.kwargs["headers"]
+    authorization_keys = [k for k in headers if k.lower() == "authorization"]
+    assert authorization_keys == ["Authorization"]
+
+
+def test_x_user_id_still_present_alongside_authorization(client, valid_user):
+    """Backward compatibility: existing headers must not be removed."""
+    mock_forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", mock_forward),
+    ):
+        client.get("/workbench/ping", headers={"Authorization": "Bearer original-jwt-value"})
+
+    headers = mock_forward.call_args.kwargs["headers"]
+    assert headers["X-User-Id"] == valid_user["user_id"]
+    assert "X-Trace-Id" in headers
+    assert headers["X-Internal-Service"] == "gateway"
+    assert "Authorization" in headers
+
+
+def test_unauthenticated_request_behavior_unchanged(client):
+    """No Authorization header at all -- AuthMiddleware must still
+    short-circuit with 401 before the gateway route (and this PR's new
+    header logic) ever runs, exactly as before this PR."""
+    resp = client.get("/workbench/ping")
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "missing token"}
+
+
+def test_invalid_token_request_behavior_unchanged(client):
+    with patch.object(_main_mod.iam, "validate", AsyncMock(return_value=None)):
+        resp = client.get(
+            "/workbench/ping", headers={"Authorization": "Bearer not-a-valid-token"}
+        )
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "invalid token"}
+
+
+def test_unknown_service_response_unchanged(client, valid_user):
+    """Same status code and response body as before this PR for the
+    unknown-service path -- no header logic runs for it either way since
+    it returns before upstream_headers is even built."""
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+    ):
+        resp = client.get(
+            "/nonexistent-service/some/path",
+            headers={"Authorization": "Bearer token"},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"error": "unknown service"}
