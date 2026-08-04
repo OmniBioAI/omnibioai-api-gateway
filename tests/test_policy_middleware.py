@@ -62,6 +62,54 @@ def test_policy_denial_without_reason(client, valid_user):
     assert resp.json().get("error") == "forbidden"
 
 
+# ---------------------------------------------------------------------------
+# IAM Foundation gateway integration: PolicyMiddleware derives the required
+# IAM permission from SERVICE_MAP (app/core/router.py) and hands it to
+# PolicyClient.evaluate as context -- the policy engine's remote call
+# remains the actual allow/deny decision either way (see policy.py's own
+# docstring); these tests only cover the derivation and pass-through.
+# ---------------------------------------------------------------------------
+
+def test_evaluate_called_with_derived_permission_for_mapped_service(client, valid_user):
+    mock_evaluate = AsyncMock(return_value={"allowed": True})
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", mock_evaluate),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+    ):
+        client.get("/workbench/ping", headers={"Authorization": "Bearer token"})
+
+    call_kwargs = mock_evaluate.call_args.kwargs
+    assert call_kwargs["required_permission"] == "workflow.execute"
+    assert call_kwargs["service"] == "workbench"
+
+
+def test_evaluate_called_with_model_use_for_model_registry(client, valid_user):
+    mock_evaluate = AsyncMock(return_value={"allowed": True})
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", mock_evaluate),
+    ):
+        client.get("/model-registry/models", headers={"Authorization": "Bearer token"})
+
+    call_kwargs = mock_evaluate.call_args.kwargs
+    assert call_kwargs["required_permission"] == "model.use"
+    assert call_kwargs["service"] == "model-registry"
+
+
+def test_evaluate_called_with_none_for_unmapped_service(client, valid_user):
+    mock_evaluate = AsyncMock(return_value={"allowed": True})
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", mock_evaluate),
+    ):
+        client.get("/nonexistent-service/x", headers={"Authorization": "Bearer token"})
+
+    call_kwargs = mock_evaluate.call_args.kwargs
+    assert call_kwargs["required_permission"] is None
+    assert call_kwargs["service"] == "nonexistent-service"
+
+
 def test_policy_middleware_no_user_returns_403():
     """PolicyMiddleware must return 403 when request.state.user is absent."""
     from starlette.applications import Starlette

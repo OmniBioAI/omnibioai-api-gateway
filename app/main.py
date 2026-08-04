@@ -78,3 +78,8 @@ app.include_router(router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/version")
+async def version():
+    return {"service": "omnibioai-api-gateway", "version": "0.1.0"}

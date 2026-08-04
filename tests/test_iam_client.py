@@ -23,6 +23,15 @@ def iam_client():
         patch("app.services.iam_client.httpx.AsyncClient", return_value=mock_http),
     ):
         client = IAMClient("http://iam-service", "redis://localhost")
+    # IAM Foundation gateway integration: validate() now calls
+    # client._shared.decode_token(...) (the real shared omnibioai-iam-client
+    # package -- see app/services/iam_client.py) before ever reaching the
+    # remote-validate code these existing tests exercise. Stubbed to
+    # succeed by default so those tests keep covering cache/remote-validate
+    # behavior unaffected; test_validate_local_decode_failure_returns_none_
+    # without_remote_call below covers the new failure path this stub
+    # bypasses everywhere else.
+    client._shared.decode_token = AsyncMock(return_value={"sub": "test-user", "roles": [], "permissions": []})
     return client, mock_redis, mock_http
 
 
@@ -311,3 +320,47 @@ async def test_subscribe_invalidation_missing_fields_defaults(iam_client):
     await client.subscribe_invalidation(on_invalidate)
 
     assert received == [("", "")]
+
+
+# ---------------------------------------------------------------------------
+# IAM Foundation gateway integration: local decode_token() pre-check
+# (RS256/JWKS-or-HS256 signature + expiry), delegated to the shared
+# omnibioai-iam-client package, ahead of the pre-existing remote-validate
+# flow every other test in this file exercises via the iam_client fixture's
+# default-succeeding stub.
+# ---------------------------------------------------------------------------
+
+async def test_validate_local_decode_failure_returns_none_without_remote_call(iam_client):
+    """A token that fails local signature/expiry verification must be
+    rejected immediately -- 401-equivalent None -- without ever reaching
+    the remote /auth/validate call."""
+    client, mock_redis, mock_http = iam_client
+    mock_redis.get.return_value = None
+    client._shared.decode_token = AsyncMock(side_effect=Exception("bad signature"))
+
+    result = await client.validate("tok")
+
+    assert result is None
+    mock_http.post.assert_not_called()
+
+
+async def test_validate_local_decode_success_proceeds_to_remote_call(iam_client):
+    """A token that passes local verification still isn't trusted on its
+    own -- the remote call remains authoritative for revocation, so it
+    must still run."""
+    client, mock_redis, mock_http = iam_client
+    mock_redis.get.return_value = None
+    resp = MagicMock()
+    resp.json.return_value = {
+        "valid": True,
+        "user_id": "1",
+        "email": "u@test.com",
+        "roles": [],
+        "permissions": [],
+    }
+    mock_http.post.return_value = resp
+
+    result = await client.validate("tok")
+
+    assert result is not None
+    mock_http.post.assert_called_once()

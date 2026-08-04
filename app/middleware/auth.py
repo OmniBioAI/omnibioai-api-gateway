@@ -4,7 +4,7 @@ from starlette.responses import JSONResponse
 from app.services.iam_client import IAMClient
 from app.services.audit_client import build_audit_event, fire_audit
 
-_SKIP_PATHS = {"/health", "/"}
+_SKIP_PATHS = {"/health", "/", "/version"}
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -45,4 +45,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         request.state.user = user
         request.state.token = token
+        # IAM Foundation gateway integration (Step 3): the canonical
+        # identity shape downstream gateway code (permission derivation,
+        # header propagation) reads from -- request.state.user above is
+        # kept unchanged for existing consumers (PolicyMiddleware,
+        # HPCMiddleware, gateway.py, auth_verify.py) rather than migrated,
+        # to avoid touching working code outside this PR's scope.
+        # client_id/token_type are fixed for now: service (client_credentials)
+        # token support is deferred to a follow-up PR pending IAM/iam-client
+        # changes (see this PR's report) -- every identity built here is a
+        # user token.
+        request.state.identity = {
+            "user_id": user.get("user_id"),
+            "organization_id": user.get("org_id"),
+            "client_id": None,
+            "permissions": user.get("permissions", []),
+            "token_type": "user",
+        }
         return await call_next(request)

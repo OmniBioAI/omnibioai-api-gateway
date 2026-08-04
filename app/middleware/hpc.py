@@ -4,7 +4,7 @@ from starlette.responses import JSONResponse
 from app.services.hpc_policy_client import HPCPolicyClient
 from app.services.audit_client import build_audit_event, fire_audit
 
-_SKIP_PATHS = {"/health", "/"}
+_SKIP_PATHS = {"/health", "/", "/version"}
 
 
 class HPCMiddleware(BaseHTTPMiddleware):
