@@ -14,14 +14,27 @@ class PolicyClient:
         path: str,
         method: str,
         trace_id: str = "",
+        required_permission: Optional[str] = None,
+        service: Optional[str] = None,
     ) -> dict:
+        # IAM Foundation gateway integration: when the caller (PolicyMiddleware)
+        # already knows which IAM permission this path's target service
+        # requires (SERVICE_MAP-derived -- see app/core/router.py), that
+        # becomes `action` directly instead of the previous auto-derived
+        # "post.samples.123"-style string, which stays as the fallback
+        # for any path this gateway hasn't classified. The policy engine
+        # -- not this client -- still makes the actual allow/deny call
+        # either way; this only changes what context it's making that
+        # call with.
+        action = required_permission or f"{method.lower()}.{path.strip('/').replace('/', '.')}"
         payload = {
             "user_id": user.get("user_id", ""),
             "email": user.get("email", ""),
             "roles": user.get("roles", []),
             "permissions": user.get("permissions", []),
-            "action": f"{method.lower()}.{path.strip('/').replace('/', '.')}",
+            "action": action,
             "resource": path,
+            "service": service,
             "context": {"method": method, "path": path},
         }
         headers = {

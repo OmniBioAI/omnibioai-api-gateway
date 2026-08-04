@@ -160,6 +160,52 @@ def test_x_user_id_still_present_alongside_authorization(client, valid_user):
     assert "Authorization" in headers
 
 
+# ---------------------------------------------------------------------------
+# IAM Foundation gateway integration (Step 7): identity propagation headers,
+# additive alongside the pre-existing X-User-Id/Authorization/X-Trace-Id/
+# X-Internal-Service headers covered above.
+# ---------------------------------------------------------------------------
+
+def test_identity_headers_forwarded_for_user_token(client):
+    mock_forward = AsyncMock(return_value=(200, {"ok": True}))
+    user = {
+        "user_id": "123",
+        "email": "test@omnibioai.com",
+        "roles": ["user"],
+        "permissions": ["workflow.execute", "model.use"],
+        "org_id": "org-42",
+    }
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", mock_forward),
+    ):
+        client.get("/workbench/ping", headers={"Authorization": "Bearer original-jwt-value"})
+
+    headers = mock_forward.call_args.kwargs["headers"]
+    assert headers["X-Organization-ID"] == "org-42"
+    assert headers["X-Client-ID"] == ""
+    assert set(headers["X-Permissions"].split(",")) == {"workflow.execute", "model.use"}
+    assert headers["X-Token-Type"] == "user"
+
+
+def test_identity_headers_default_empty_when_org_id_absent(client, valid_user):
+    """valid_user (conftest) carries no org_id -- must produce an empty
+    string, not the literal "None", on the wire."""
+    mock_forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", mock_forward),
+    ):
+        client.get("/workbench/ping", headers={"Authorization": "Bearer tok"})
+
+    headers = mock_forward.call_args.kwargs["headers"]
+    assert headers["X-Organization-ID"] == ""
+
+
 def test_unauthenticated_request_behavior_unchanged(client):
     """No Authorization header at all -- AuthMiddleware must still
     short-circuit with 401 before the gateway route (and this PR's new

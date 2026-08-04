@@ -24,6 +24,7 @@ async def gateway(service: str, path: str, request: Request):
     trace_id = getattr(request.state, "trace_id", "")
     user_id = user.get("user_id", "") if user else ""
     token = getattr(request.state, "token", None)
+    identity = getattr(request.state, "identity", None)
 
     body = None
     try:
@@ -45,6 +46,22 @@ async def gateway(service: str, path: str, request: Request):
     upstream_headers["X-Internal-Service"] = "gateway"
     upstream_headers["X-Trace-Id"] = trace_id
     upstream_headers["X-User-Id"] = user_id
+    # IAM Foundation gateway integration (Step 7): identity propagation
+    # headers derived from request.state.identity, additive alongside the
+    # pre-existing X-User-Id/X-Trace-Id/X-Internal-Service above -- none
+    # of those are renamed or removed. client_id/token_type are always
+    # None/"user" today since service-token support is deferred (see
+    # this PR's report); the headers still exist now so a downstream
+    # service can start reading them ahead of that landing, rather than
+    # needing another gateway change when it does. X-Permissions is
+    # comma-joined -- every permission name is already constrained to
+    # `[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*` by omnibioai-auth's own registry
+    # validation, so a plain comma-join is safe and unambiguous here,
+    # unlike sending JSON in a header value.
+    upstream_headers["X-Organization-ID"] = str(identity.get("organization_id") or "") if identity else ""
+    upstream_headers["X-Client-ID"] = str(identity.get("client_id") or "") if identity else ""
+    upstream_headers["X-Permissions"] = ",".join(identity.get("permissions", [])) if identity else ""
+    upstream_headers["X-Token-Type"] = identity.get("token_type", "") if identity else ""
     if token:
         # SSO Phase 2 PR4: forward the original, already-validated bearer
         # token downstream (from request.state.token -- the exact string
