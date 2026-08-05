@@ -75,3 +75,22 @@ def test_is_compute_service_true_for_known_services(service):
 
 def test_is_compute_service_false_for_unknown():
     assert _main_mod.hpc.is_compute_service("unknown-service") is False
+
+
+def test_hpc_evaluate_receives_user_roles(client, valid_user):
+    """PR12: the HPC engine's /jobs/evaluate now actually checks roles --
+    request.state.user's roles must reach HPCPolicyClient.evaluate(),
+    not just user_id."""
+    mock_hpc_eval = AsyncMock(return_value={"allow": True})
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(
+            _main_mod.policy,
+            "evaluate",
+            AsyncMock(return_value={"allowed": True}),
+        ),
+        patch.object(_main_mod.hpc, "evaluate", mock_hpc_eval),
+    ):
+        client.get("/workbench/", headers={"Authorization": "Bearer token"})
+    mock_hpc_eval.assert_called_once()
+    assert mock_hpc_eval.call_args.kwargs["roles"] == valid_user["roles"]

@@ -20,6 +20,7 @@ class HPCPolicyClient:
         gpu_hours: float = 0,
         gpus: int = 0,
         memory_gb: int = 0,
+        roles: list | None = None,
     ) -> dict:
         payload = {
             "user_id": user_id,
@@ -28,6 +29,11 @@ class HPCPolicyClient:
             "gpus": gpus,
             "memory_gb": memory_gb,
             "partition": "gpu" if gpus > 0 else "cpu",
+            # PR12: /jobs/evaluate now actually checks roles (previously
+            # always approved regardless) -- forward what AuthMiddleware
+            # already put on request.state.user instead of leaving it
+            # unset (defaulting to no roles at all on the HPC engine side).
+            "roles": roles or [],
         }
         headers = {
             "X-Internal-Service": "gateway",

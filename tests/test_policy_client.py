@@ -97,3 +97,27 @@ async def test_evaluate_empty_user_fields(policy_client):
     mock_http.post.return_value = resp
     result = await client.evaluate({}, "/path", "GET")
     assert result["allowed"] is False
+
+
+async def test_evaluate_sends_org_id(policy_client):
+    """PR12: org_id must reach the Policy Engine so it can enforce
+    org-tenancy scoping -- previously dropped even though it's already on
+    `user` (AuthMiddleware/IAMClient.validate())."""
+    client, mock_http = policy_client
+    resp = MagicMock()
+    resp.json.return_value = {"allowed": True}
+    mock_http.post.return_value = resp
+    user = {**_USER, "org_id": "org-42"}
+    await client.evaluate(user, "/samples", "GET")
+    payload = mock_http.post.call_args[1]["json"]
+    assert payload["org_id"] == "org-42"
+
+
+async def test_evaluate_org_id_none_when_absent(policy_client):
+    client, mock_http = policy_client
+    resp = MagicMock()
+    resp.json.return_value = {"allowed": True}
+    mock_http.post.return_value = resp
+    await client.evaluate(_USER, "/samples", "GET")
+    payload = mock_http.post.call_args[1]["json"]
+    assert payload["org_id"] is None

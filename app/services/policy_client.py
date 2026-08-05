@@ -32,6 +32,12 @@ class PolicyClient:
             "email": user.get("email", ""),
             "roles": user.get("roles", []),
             "permissions": user.get("permissions", []),
+            # PR12: the Policy Engine now enforces org-tenancy
+            # (app/core/tenancy.py there) when a request supplies both
+            # this and context.resource_org_id -- previously org_id never
+            # reached the Policy Engine at all, despite already being on
+            # `user` (AuthMiddleware/IAMClient.validate()).
+            "org_id": user.get("org_id"),
             "action": action,
             "resource": path,
             "service": service,
