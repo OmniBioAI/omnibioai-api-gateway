@@ -108,3 +108,25 @@ async def test_evaluate_all_resource_fields(hpc_client):
     assert payload["gpus"] == 4
     assert payload["memory_gb"] == 32
     assert result == {"allow": False, "reason": "quota"}
+
+
+async def test_evaluate_forwards_roles(hpc_client):
+    """PR12: /jobs/evaluate now actually checks roles (gpu_user/
+    dgx_access) instead of always approving -- must reach the HPC engine."""
+    client, mock_http = hpc_client
+    resp = MagicMock()
+    resp.json.return_value = {"allow": True}
+    mock_http.post.return_value = resp
+    await client.evaluate("u1", "tes", roles=["gpu_user", "dgx_access"])
+    payload = mock_http.post.call_args[1]["json"]
+    assert payload["roles"] == ["gpu_user", "dgx_access"]
+
+
+async def test_evaluate_defaults_to_no_roles(hpc_client):
+    client, mock_http = hpc_client
+    resp = MagicMock()
+    resp.json.return_value = {"allow": True}
+    mock_http.post.return_value = resp
+    await client.evaluate("u1", "tes")
+    payload = mock_http.post.call_args[1]["json"]
+    assert payload["roles"] == []

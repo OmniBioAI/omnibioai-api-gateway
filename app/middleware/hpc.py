@@ -25,11 +25,13 @@ class HPCMiddleware(BaseHTTPMiddleware):
         user = getattr(request.state, "user", None)
         trace_id = getattr(request.state, "trace_id", "")
         user_id = user.get("user_id", "") if user else ""
+        roles = user.get("roles", []) if user else []
 
         decision = await self.hpc.evaluate(
             user_id=user_id,
             service=service,
             trace_id=trace_id,
+            roles=roles,
         )
 
         if not decision.get("allow", False):
