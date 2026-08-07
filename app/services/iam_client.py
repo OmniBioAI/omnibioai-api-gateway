@@ -119,7 +119,33 @@ class IAMClient:
                     # dict get None either way, so no special-case handling
                     # is needed for old cache entries, only for the shape
                     # of what a *new* validate() call writes.
-                    "org_id": data.get("org_id"),
+                    #
+                    # PR14.5D: str(), not the raw value -- /auth/validate's
+                    # JSON returns org_id as an int (its own DB primary
+                    # key), and this cache lives under the same `iam:
+                    # {token}` Redis key namespace the shared omnibioai-
+                    # iam-client package's own AsyncIAMClient reads from
+                    # (every other IAM-integrated service -- billing, rag,
+                    # model-registry -- uses that package, not this one).
+                    # That package's UserContext pydantic model declares
+                    # org_id: Optional[str], strict in pydantic v2 (no
+                    # int->str coercion) -- an int here means any of those
+                    # services' first read of a token gateway already
+                    # cached raises a ValidationError, silently swallowed
+                    # by their own broad `except Exception: user = None`,
+                    # misreporting a perfectly valid token as invalid.
+                    # Reproduced live: billing-service returning 401
+                    # "Invalid, expired, or revoked token" for a token
+                    # that worked fine called directly, only after it had
+                    # first passed through nginx's auth_request gate
+                    # (which calls this validate() and populates the
+                    # shared cache). validate_remote() in the shared
+                    # package itself already does this identical cast for
+                    # its own cache writes -- this brings gateway's
+                    # independent cache-write (see this class's docstring
+                    # for why it has one) in line with that, instead of
+                    # leaving the two silently incompatible.
+                    "org_id": str(data["org_id"]) if data.get("org_id") is not None else None,
                     "org_role": data.get("org_role", []),
                     "schema_version": data.get("schema_version", 1),
                     "valid": True,

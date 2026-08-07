@@ -137,9 +137,35 @@ async def test_validate_remote_propagates_org_context(iam_client):
     }
     mock_http.post.return_value = resp
     result = await client.validate("tok")
-    assert result["org_id"] == 7
+    # PR14.5D: str, not the raw int /auth/validate returns -- see
+    # test_validate_remote_casts_org_id_to_string_for_shared_cache_
+    # compatibility below for why.
+    assert result["org_id"] == "7"
     assert result["org_role"] == ["org_admin"]
     assert result["schema_version"] == 2
+
+
+async def test_validate_remote_casts_org_id_to_string_for_shared_cache_compatibility(iam_client):
+    """PR14.5D regression test: this cache lives under the same `iam:
+    {token}` Redis key namespace the shared omnibioai-iam-client
+    package's AsyncIAMClient reads from (every other IAM-integrated
+    service -- billing, rag, model-registry -- uses that package). Its
+    UserContext model declares org_id: Optional[str], strict in
+    pydantic v2 -- caching the raw int /auth/validate returns broke any
+    of those services' first read of a token gateway had already
+    validated and cached, misreporting it as an invalid token. See this
+    file's iam_client.py::validate() for the live-reproduction note."""
+    client, mock_redis, mock_http = iam_client
+    mock_redis.get.return_value = None
+    resp = MagicMock()
+    resp.json.return_value = {
+        "valid": True, "user_id": "1", "email": "u@test.com",
+        "roles": [], "permissions": [], "org_id": 1,
+    }
+    mock_http.post.return_value = resp
+    result = await client.validate("tok")
+    assert result["org_id"] == "1"
+    assert isinstance(result["org_id"], str)
 
 
 async def test_validate_remote_defaults_org_context_when_absent(iam_client):
