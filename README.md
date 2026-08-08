@@ -71,6 +71,15 @@ IAM validation      AuthMiddleware → IAMClient.validate(token)
 Policy               PolicyMiddleware → PolicyClient.evaluate(...)
       │              — POSTs user_id/email/roles/permissions/action/resource
       │                to {POLICY_URL}/policy/evaluate
+      │              — `action` is the target service's mapped IAM
+      │                permission when one exists (SERVICE_PERMISSION_MAP
+      │                in app/core/router.py: workbench/tes/toolserver →
+      │                workflow.execute, model-registry → model.use,
+      │                rag → dataset.read), else a derived
+      │                "{method}.{path}" string — this mapping only
+      │                enriches what the policy engine evaluates against;
+      │                the engine's remote decision is still the sole
+      │                allow/deny authority
       │              — deny → 403, fail closed
       │              (HPCMiddleware runs next, compute paths only —
       │               GPU/CPU quota via {HPC_URL}/jobs/evaluate, also
@@ -166,6 +175,40 @@ Middleware is applied LIFO — last added runs first for requests:
 
 ---
 
+## Repository Structure
+
+```text
+app/
+├── main.py                    # Registers middleware (LIFO) and routers
+├── core/
+│   ├── config.py               # Settings from environment
+│   ├── router.py               # SERVICE_MAP, SERVICE_PERMISSION_MAP,
+│   │                            # resolve_service(), resolve_required_permission()
+│   ├── permissions.py          # require_permission() dependency — for
+│   │                            # gateway-native routes only (e.g. /auth/verify),
+│   │                            # deliberately not wired into the proxy route
+│   │                            # to avoid duplicating PolicyMiddleware's decision
+│   └── security.py             # Trace-ID generation + its own audit event
+├── middleware/
+│   ├── s2s.py                  # TraceMiddleware (name predates current scope —
+│   │                            # this is not a service-to-service credential
+│   │                            # system; see "Service identity" above)
+│   ├── auth.py                 # AuthMiddleware
+│   ├── policy.py               # PolicyMiddleware
+│   ├── hpc.py                  # HPCMiddleware
+│   └── audit.py                # AuditMiddleware
+├── routes/
+│   ├── auth_verify.py          # GET /auth/verify
+│   └── gateway.py              # Catch-all proxy route
+└── services/
+    ├── iam_client.py           # IAM validation client
+    ├── policy_client.py        # Policy engine client
+    ├── hpc_policy_client.py    # HPC policy engine client
+    └── audit_client.py         # Audit event client
+```
+
+---
+
 ## API Endpoints
 
 | Endpoint | Method | Auth | Description |
@@ -246,10 +289,12 @@ Set in `omnibioai-studio/.env`:
 cd ~/Desktop/machine/omnibioai-api-gateway
 pytest tests/ -v --cov=app
 
-# 33 tests passing
-# 74% coverage
+# 179 tests passing
+# 99% coverage
 # Covers: auth middleware, policy middleware, HPC middleware,
-#         trace middleware, config, gateway router
+#         trace middleware, audit middleware, config, gateway router,
+#         permissions dependency, and the PR12/PR13 middleware-chain
+#         end-to-end + org-context/role-tier forwarding suites
 ```
 
 ---
@@ -286,4 +331,4 @@ Apache 2.0
 
 ---
 
-*Part of the [OmniBioAI](https://github.com/man4ish/omnibioai-studio) platform.*
+*Part of the [OmniBioAI](https://github.com/OmniBioAI/omnibioai-studio) platform.*
