@@ -43,24 +43,44 @@ class IAMClient:
         self._shared = _SharedIAMClient(base_url, redis_url)
 
     # ------------------------------------------------------------------
-    # Cache helpers  (key: iam:{token}, TTL 5 min)
+    # Cache helpers  (key: gateway:iam:{token}, TTL 5 min)
+    #
+    # Prefixed, not the shared package's own bare "iam:{token}" -- this
+    # class is its own independent, hand-rolled cache (see class
+    # docstring for why: the shared package's Redis usage is synchronous
+    # and would block this service's event loop), but it was writing to
+    # the *same* Redis instance and the *same* unprefixed key every other
+    # IAM-integrated service (billing, rag, model-registry -- see the
+    # str(org_id) comment above) also reads/writes via the shared
+    # package's own AsyncIAMClient.get_user()/set_cache(). Two
+    # independent cache implementations racing on one shared key means
+    # whichever service validates a given token first dictates the
+    # shape every other service's read has to survive -- this is
+    # exactly the mechanism the org_id-as-str fix above already had to
+    # work around once, and omnibioai-tes's own equivalent hand-rolled
+    # cache (security/iam.py there, now "tes:iam:") hit the same
+    # collision independently, reproduced live as a pydantic
+    # ValidationError on the workflow-bundles side. This prefix removes
+    # gateway from that shared key entirely, on the same principle.
     # ------------------------------------------------------------------
+    _CACHE_PREFIX = "gateway:iam:"
+
     async def _get_cached(self, token: str) -> Optional[dict]:
         try:
-            raw = await self.redis.get(f"iam:{token}")
+            raw = await self.redis.get(f"{self._CACHE_PREFIX}{token}")
             return json.loads(raw) if raw else None
         except Exception:
             return None
 
     async def _set_cached(self, token: str, user: dict, ttl: int = 300):
         try:
-            await self.redis.setex(f"iam:{token}", ttl, json.dumps(user))
+            await self.redis.setex(f"{self._CACHE_PREFIX}{token}", ttl, json.dumps(user))
         except Exception:
             pass
 
     async def evict(self, token: str):
         try:
-            await self.redis.delete(f"iam:{token}")
+            await self.redis.delete(f"{self._CACHE_PREFIX}{token}")
         except Exception:
             pass
 
