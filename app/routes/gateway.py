@@ -10,6 +10,36 @@ from app.services.audit_client import _emit, build_audit_event
 router = APIRouter()
 proxy = ProxyClient()
 
+# Tenant-isolation audit finding: this used to list only "host"/
+# "content-length"/"authorization" -- every *other* identity header the
+# gateway itself sets below (X-Organization-ID, X-User-Id, X-Client-ID,
+# X-Permissions, X-Token-Type, X-Trace-Id, X-Internal-Service) was left
+# to flow through from the client unmodified, then have the gateway's
+# own value assigned under the differently-cased dict key
+# `"X-Organization-ID"` (capital X) right after. Since Python dict keys
+# are case-sensitive but HTTP header names aren't, a client-supplied
+# `x-organization-id: <victim-org>` and the gateway's own
+# `X-Organization-ID: <real-org>` both survived as distinct dict
+# entries and were sent as two separate header lines on the wire
+# (verified directly against httpx, the library `ProxyClient` uses) --
+# a downstream service that reads this header case-insensitively and
+# takes the first/only value, or naively splits on comma and takes
+# index 0, would receive the attacker-controlled value instead of the
+# gateway's own. Every downstream service audited so far
+# (omnibioai-rag, omnibioai-tes, omnibioai-model-registry) independently
+# re-verifies the forwarded JWT and never reads these headers for
+# authorization at all, so this was not exploitable against any
+# *current* consumer -- but nothing stops a future one from trusting
+# them, and the header this gateway sets is the one place that trust
+# boundary is supposed to be enforced. Now excludes every header name
+# the gateway sets itself, the same treatment "authorization" already
+# got -- module-level since it's a fixed set, not per-request state.
+_RESERVED_UPSTREAM_HEADERS = frozenset({
+    "host", "content-length", "authorization",
+    "x-internal-service", "x-trace-id", "x-user-id",
+    "x-organization-id", "x-client-id", "x-permissions", "x-token-type",
+})
+
 
 @router.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def gateway(service: str, path: str, request: Request):
@@ -32,16 +62,11 @@ async def gateway(service: str, path: str, request: Request):
     except Exception:
         body = None
 
-    # Attach internal S2S headers to upstream call. "authorization" is
-    # excluded from this generic passthrough (rather than left to flow
-    # through implicitly) so the explicit Authorization assignment below
-    # is the single source of truth -- a plain dict can hold both
-    # "authorization" and "Authorization" as distinct keys (Python dict
-    # keys are case-sensitive; HTTP header names aren't), which would
-    # otherwise risk sending two Authorization headers on the wire.
+    # See _RESERVED_UPSTREAM_HEADERS above for why every gateway-set
+    # identity header must be excluded here, not just authorization.
     upstream_headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "authorization")
+        if k.lower() not in _RESERVED_UPSTREAM_HEADERS
     }
     upstream_headers["X-Internal-Service"] = "gateway"
     upstream_headers["X-Trace-Id"] = trace_id
