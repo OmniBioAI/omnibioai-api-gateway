@@ -12,6 +12,18 @@ dependencies = [
     "httpx",
     "redis[asyncio]",
     "pyjwt",
+
+    # IAM Foundation gateway integration: app/services/iam_client.py uses
+    # AsyncIAMClient for RS256/JWKS/HS256 token verification. Pinned direct
+    # git reference -- omnibioai-iam-client is a private repo distributed
+    # via git+https, not a package index (GitHub Packages has no
+    # PyPI-format registry). Same pinned-tag distribution convention and
+    # version (latest, additive/backward-compatible UserContext fields) as
+    # omnibioai-tes/omnibioai-rag's own pyproject.toml entries for this
+    # same dependency -- see [tool.hatch.metadata] below for the one
+    # allowance this repo specifically needs that those two don't (they're
+    # both setuptools-backed, not hatchling).
+    "omnibioai-iam-client @ git+https://github.com/OmniBioAI/omnibioai-iam-client.git@v0.1.3",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +36,17 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+# Required for the pinned git+https omnibioai-iam-client dependency above:
+# hatchling's own metadata validation otherwise rejects any PEP 508 "direct
+# reference" (a `name @ <url>` dependency) with
+# "Dependency ... cannot be a direct reference unless field
+# tool.hatch.metadata.allow-direct-references is set to true" -- confirmed
+# by an actual local `pip install .` build failing with exactly that error
+# before this was added. Scoped to direct references only; does not
+# otherwise relax dependency resolution.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
