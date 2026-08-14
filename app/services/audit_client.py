@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import uuid
 from datetime import datetime, timezone
@@ -10,6 +12,53 @@ from app.core.config import Config
 
 _redis = aioredis.from_url(Config.AUDIT_REDIS, decode_responses=True)
 STREAM = "audit:events"
+
+
+# ---------------------------------------------------------------------------
+# HIPAA PR3b: producer-side signing. Hand-ported from
+# omnibioai-security-audit's audit/signing.py::sign_audit_event -- that
+# repo is not a dependency of this one (separate deployable, no shared
+# package, same tradeoff already accepted for build_audit_event's contract
+# above), so this is a parallel, hand-kept-in-sync copy of the *signing*
+# half only. Only the consumer needs verify_audit_event; a producer never
+# needs to verify its own signature.
+#
+# Byte-for-byte identical construction to the original: domain-separated
+# HMAC-SHA256 key derivation, "v1\n<service>\n<data>" as the signed
+# message. Must stay in sync with that module or every event this service
+# signs will fail the consumer's verify_audit_event() -- there is no
+# import-time check that would catch drift, only the cross-repo signing
+# tests (this file's own, and the two contract-reconciliation suites in
+# each repo) exercising real HMAC values against each other's fixtures.
+# ---------------------------------------------------------------------------
+_SIGNING_DOMAIN_LABEL = "omnibioai-audit-events"
+_SIGNING_VERSION = "v1"
+
+
+def _signing_key(secret: str) -> bytes:
+    return hashlib.sha256(f"{_SIGNING_DOMAIN_LABEL}:{secret}".encode()).digest()
+
+
+def _signing_message(version: str, service: str, data: str) -> bytes:
+    return f"{version}\n{service}\n{data}".encode()
+
+
+def sign_audit_event(service: str, data: str, secret: str) -> str:
+    """Returns the `sig` field value for one audit event: `"v1:<hex-hmac>"`.
+
+    `data` must be the *exact* string that will be written to the stream's
+    `data` field -- not a re-serialization -- since the MAC covers those
+    exact bytes. See _emit() below: `data` is computed once and the same
+    string is both signed and published, never re-encoded in between.
+    """
+    if not service:
+        raise ValueError("service must be a non-empty string")
+    if data is None:
+        raise ValueError("data must not be None")
+    mac = hmac.new(
+        _signing_key(secret), _signing_message(_SIGNING_VERSION, service, data), hashlib.sha256
+    ).hexdigest()
+    return f"{_SIGNING_VERSION}:{mac}"
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +129,18 @@ def build_audit_event(
 
 async def _emit(event: dict):
     try:
+        # `data` is computed exactly once and both signed and published as
+        # that same string -- signing a dict and separately re-serializing
+        # it for the wire would let JSON key-order/whitespace differences
+        # desync the signature from what the consumer actually verifies.
+        data = json.dumps(event, default=str)
+        fields = {"data": data}
+        service = event.get("service")
+        if service:
+            fields["sig"] = sign_audit_event(service, data, Config.JWT_SECRET)
         await _redis.xadd(
             STREAM,
-            {"data": json.dumps(event, default=str)},
+            fields,
             maxlen=1_000_000,
             approximate=True,
         )
