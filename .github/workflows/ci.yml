@@ -41,6 +41,14 @@ jobs:
             type=raw,value=latest
             type=sha,prefix=sha-,format=short
 
+      # QEMU registers binfmt_misc handlers so the amd64 GitHub-hosted
+      # runner can emulate arm64 instructions -- required for Buildx to
+      # actually execute the arm64 half of the multi-platform build below
+      # (setup-buildx-action alone only gives you a BuildKit builder, not
+      # the ability to run non-native-arch layers).
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -53,11 +61,24 @@ jobs:
       # install inside the Dockerfile's RUN --mount=type=secret layer --
       # a configuration gap to fix by adding the repo secret, not by
       # working around it here.
+      #
+      # platforms: linux/amd64,linux/arm64 -- makes build-push-action emit
+      # a single multi-arch manifest list under each tag from
+      # steps.meta.outputs.tags (not two separate single-arch images), so
+      # `docker pull`/`docker run` on either architecture resolves the
+      # same tag to the right native image. All of this Dockerfile's
+      # dependencies (fastapi/uvicorn/httpx/redis/pyjwt, plus the pinned
+      # omnibioai-iam-client git dependency's own httpx/redis/python-jose/
+      # pydantic) are pure-Python or ship manylinux aarch64 wheels
+      # (pydantic-core, cryptography), and python:3.11-slim itself
+      # publishes an arm64 variant -- so no cross-compilation toolchain is
+      # needed for the emulated arm64 leg.
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
