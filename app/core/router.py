@@ -4,6 +4,15 @@ SERVICE_MAP = {
     "toolserver": "http://toolserver:9090",
     "model-registry": "http://model-registry:8095",
     "rag": "http://rag:8096",
+    # ServiceNow Enterprise Integration: omnibioai-servicenow, a new
+    # backend service (not embedded in Control Center's proxy layer --
+    # every routes_*_proxy.py in that repo relays to a service that
+    # already does its own independent authorization, and this one is no
+    # different) that owns the OAuth 2.0 client-credentials connection to
+    # ServiceNow and the incident CRUD surface. Same shape as every other
+    # SERVICE_MAP entry: this gateway proxies to it, it does not implement
+    # any ServiceNow logic itself.
+    "servicenow": "http://servicenow:8097",
 }
 
 
@@ -32,6 +41,16 @@ SERVICE_PERMISSION_MAP = {
     "toolserver": "workflow.execute",
     "model-registry": "model.use",
     "rag": "dataset.read",
+    # Coarse, service-level gate only -- same "one permission per service"
+    # granularity every other SERVICE_MAP entry gets here, gating whether
+    # the policy engine lets a request reach omnibioai-servicenow at all.
+    # That service independently re-verifies the JWT and enforces the
+    # finer read-vs-write distinction itself (servicenow_incident.read on
+    # GET routes, servicenow_incident.write on the mutating ones) -- the
+    # same layered "gateway-level coarse gate + service-level independent,
+    # finer check" pattern omnibioai-rag's dataset.read/app/api/iam.py
+    # already established, not a new authorization model.
+    "servicenow": "servicenow_incident.read",
 }
 
 
