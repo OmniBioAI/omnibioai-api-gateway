@@ -1,5 +1,4 @@
 """Tests for app/services/iam_client.py — IAMClient unit tests."""
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,7 +40,7 @@ async def test_get_cached_hit(iam_client):
     mock_redis.get.return_value = json.dumps(user)
     result = await client._get_cached("tok")
     assert result == user
-    mock_redis.get.assert_called_once_with("iam:tok")
+    mock_redis.get.assert_called_once_with("gateway:iam:tok")
 
 
 async def test_get_cached_miss_returns_none(iam_client):
@@ -60,7 +59,7 @@ async def test_set_cached_calls_setex(iam_client):
     client, mock_redis, _ = iam_client
     user = {"user_id": "1"}
     await client._set_cached("tok", user, ttl=60)
-    mock_redis.setex.assert_called_once_with("iam:tok", 60, json.dumps(user))
+    mock_redis.setex.assert_called_once_with("gateway:iam:tok", 60, json.dumps(user))
 
 
 async def test_set_cached_default_ttl(iam_client):
@@ -79,7 +78,7 @@ async def test_set_cached_redis_error_silenced(iam_client):
 async def test_evict_calls_delete(iam_client):
     client, mock_redis, _ = iam_client
     await client.evict("tok")
-    mock_redis.delete.assert_called_once_with("iam:tok")
+    mock_redis.delete.assert_called_once_with("gateway:iam:tok")
 
 
 async def test_evict_redis_error_silenced(iam_client):
@@ -226,7 +225,7 @@ async def test_validate_remote_invalid_evicts_and_returns_none(iam_client):
     mock_http.post.return_value = resp
     result = await client.validate("tok")
     assert result is None
-    mock_redis.delete.assert_called_once_with("iam:tok")
+    mock_redis.delete.assert_called_once_with("gateway:iam:tok")
 
 
 async def test_validate_timeout_first_attempt_retries_and_succeeds(iam_client):
