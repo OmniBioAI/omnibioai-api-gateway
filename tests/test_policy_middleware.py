@@ -4,6 +4,8 @@ Tests for PolicyMiddleware (app/middleware/policy.py).
 PolicyClient.evaluate() returns {"allowed": bool, "reason": str}.
 The middleware returns 403 {"error": "forbidden", "reason": ...} on denial.
 """
+import json
+import pytest
 from unittest.mock import AsyncMock, patch
 
 import app.main as _main_mod
@@ -110,22 +112,23 @@ def test_evaluate_called_with_none_for_unmapped_service(client, valid_user):
     assert call_kwargs["service"] == "nonexistent-service"
 
 
-def test_policy_middleware_no_user_returns_403():
+@pytest.mark.asyncio
+async def test_policy_middleware_no_user_returns_403():
     """PolicyMiddleware must return 403 when request.state.user is absent."""
     from starlette.applications import Starlette
-    from starlette.responses import PlainTextResponse
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
+    from starlette.requests import Request
     from app.middleware.policy import PolicyMiddleware
 
-    async def dummy(request):
-        return PlainTextResponse("ok")
+    inner_app = Starlette()
+    middleware = PolicyMiddleware(inner_app, policy=AsyncMock())
+    request = Request({
+        "type": "http", "method": "GET", "path": "/secure",
+        "headers": [], "query_string": b"",
+    })
 
-    inner_app = Starlette(routes=[Route("/secure", dummy)])
-    inner_app.add_middleware(PolicyMiddleware, policy=AsyncMock())
+    async def call_next(_request):
+        raise AssertionError("the endpoint must not be reached")
 
-    with TestClient(inner_app, raise_server_exceptions=False) as c:
-        resp = c.get("/secure")
-
+    resp = await middleware.dispatch(request, call_next)
     assert resp.status_code == 403
-    assert resp.json()["error"] == "forbidden"
+    assert json.loads(resp.body)["error"] == "forbidden"
