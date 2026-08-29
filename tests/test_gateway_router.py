@@ -109,6 +109,27 @@ def test_authenticated_request_forwards_authorization_header(client, valid_user)
     assert "Authorization" in headers
 
 
+def test_gateway_forwards_query_string_to_upstream(client, valid_user):
+    """Routing must preserve upstream selectors such as TES server_id."""
+    mock_forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", mock_forward),
+    ):
+        response = client.post(
+            "/tes/api/runs/submit?server_id=slurm_local",
+            headers={"Authorization": "Bearer original-jwt-value"},
+            json={"tool_id": "echo_test", "inputs": {}, "resources": {}},
+        )
+
+    assert response.status_code == 200
+    assert mock_forward.call_args.kwargs["url"].endswith(
+        "/api/runs/submit?server_id=slurm_local"
+    )
+
+
 def test_forwarded_jwt_value_is_unchanged(client, valid_user):
     """The exact token string the client sent (and AuthMiddleware already
     validated) must reach the upstream call unmodified."""

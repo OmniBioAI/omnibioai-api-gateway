@@ -48,7 +48,12 @@ async def gateway(service: str, path: str, request: Request):
     if not target:
         return {"error": "unknown service"}
 
+    # Preserve encoded query parameters for upstream contracts such as TES's
+    # `server_id` selector.  The generic proxy must not silently change the
+    # semantics of a routed request by dropping its query string.
     url = f"{target}/{path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
 
     user = getattr(request.state, "user", None)
     trace_id = getattr(request.state, "trace_id", "")
