@@ -11,6 +11,7 @@ Known service → proxy attempt. ProxyClient.forward() is mocked (see
                 assert the gateway now propagates the real upstream status
                 code instead of always returning 200.
 """
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import app.main as _main_mod
@@ -128,6 +129,48 @@ def test_gateway_forwards_query_string_to_upstream(client, valid_user):
     assert mock_forward.call_args.kwargs["url"].endswith(
         "/api/runs/submit?server_id=slurm_local"
     )
+
+
+def test_gateway_query_forwarding_unit_without_application_lifespan():
+    """Cover query preservation without starting the Redis invalidation task."""
+    from app.routes.gateway import gateway
+
+    class _Request:
+        method = "GET"
+
+        def __init__(self, query):
+            self.url = type("URL", (), {"query": query})()
+            self.headers = {}
+            self.state = type(
+                "State",
+                (),
+                {"user": None, "trace_id": "", "token": None, "identity": None},
+            )()
+
+        async def json(self):
+            raise ValueError("no body")
+
+    async def exercise():
+        forwarded = []
+
+        async def forward(**kwargs):
+            forwarded.append(kwargs["url"])
+            return 200, {"ok": True}
+
+        with patch("app.routes.gateway.proxy.forward", forward), patch(
+            "app.routes.gateway._emit", AsyncMock()
+        ):
+            for query in ("", "server_id=slurm_local", "a=1&b=two%20words"):
+                response = await gateway("tes", "api/runs/submit", _Request(query))
+                assert response.status_code == 200
+
+        return forwarded
+
+    assert asyncio.run(exercise()) == [
+        "http://tes:8081/api/runs/submit",
+        "http://tes:8081/api/runs/submit?server_id=slurm_local",
+        "http://tes:8081/api/runs/submit?a=1&b=two%20words",
+    ]
 
 
 def test_forwarded_jwt_value_is_unchanged(client, valid_user):
