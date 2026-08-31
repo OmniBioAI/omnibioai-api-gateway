@@ -69,7 +69,8 @@ def sign_audit_event(service: str, data: str, secret: str) -> str:
 #
 # Field names and types mirror omnibioai-security-audit's AuditEvent
 # (audit/models.py) exactly: event_id, timestamp, service, event_type,
-# user_id, action, resource, decision, reason, trace_id, context. That repo
+# user_id, organization_id, tenant_scope, action, resource, decision, reason,
+# trace_id, context. That repo
 # is not a dependency of this one (separate deployable, no shared package),
 # so this is a parallel, hand-kept-in-sync definition, not a shared import
 # -- see PR4.5's report for why, and the cross-repo regression tests in
@@ -98,6 +99,8 @@ def build_audit_event(
     event_type: str,
     action: str = "",
     user_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    tenant_scope: str = "unknown",
     resource: Optional[str] = None,
     decision: Optional[str] = None,
     reason: Optional[str] = None,
@@ -118,6 +121,8 @@ def build_audit_event(
         "service": service,
         "event_type": event_type,
         "user_id": user_id,
+        "organization_id": organization_id,
+        "tenant_scope": tenant_scope,
         "action": action,
         "resource": resource,
         "decision": decision,

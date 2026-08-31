@@ -25,6 +25,8 @@ class HPCMiddleware(BaseHTTPMiddleware):
         user = getattr(request.state, "user", None)
         trace_id = getattr(request.state, "trace_id", "")
         user_id = user.get("user_id", "") if user else ""
+        identity = getattr(request.state, "identity", None)
+        organization_id = identity.get("organization_id") if identity else None
         roles = user.get("roles", []) if user else []
 
         decision = await self.hpc.evaluate(
@@ -39,6 +41,8 @@ class HPCMiddleware(BaseHTTPMiddleware):
                 service="gateway",
                 event_type="hpc_denied",
                 user_id=user_id,
+                organization_id=organization_id,
+                tenant_scope="organization" if organization_id is not None else "unknown",
                 action=f"{request.method} {request.url.path}",
                 decision="deny",
                 reason=decision.get("reason", "hpc_quota_exceeded"),

@@ -23,7 +23,8 @@ import app.services.audit_client as _audit_client_mod
 
 CONTRACT_FIELDS = {
     "event_id", "timestamp", "service", "event_type", "user_id",
-    "action", "resource", "decision", "reason", "trace_id", "context",
+    "organization_id", "tenant_scope", "action", "resource", "decision",
+    "reason", "trace_id", "context",
 }
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
