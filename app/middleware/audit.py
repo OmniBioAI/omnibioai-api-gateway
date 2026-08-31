@@ -19,12 +19,16 @@ class AuditMiddleware(BaseHTTPMiddleware):
         latency_ms = int((time.time() - start) * 1000)
 
         user = getattr(request.state, "user", None)
+        identity = getattr(request.state, "identity", None)
+        organization_id = identity.get("organization_id") if identity else None
         trace_id = getattr(request.state, "trace_id", "")
 
         fire_audit(build_audit_event(
             service="gateway",
             event_type="request",
             user_id=user.get("user_id") if user else None,
+            organization_id=organization_id,
+            tenant_scope="organization" if organization_id is not None else "unknown",
             action=f"{request.method} {request.url.path}",
             decision="allow" if response.status_code < 400 else "deny",
             trace_id=trace_id,

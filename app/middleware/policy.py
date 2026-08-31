@@ -43,10 +43,13 @@ class PolicyMiddleware(BaseHTTPMiddleware):
         required_permission = resolve_required_permission(service)
 
         identity = getattr(request.state, "identity", None)
+        organization_id = identity.get("organization_id") if identity else None
         fire_audit(build_audit_event(
             service="gateway",
             event_type="iam_auth_success",
             user_id=user.get("user_id"),
+            organization_id=organization_id,
+            tenant_scope="organization" if organization_id is not None else "unknown",
             action=required_permission or f"{request.method.lower()}.{request.url.path.strip('/').replace('/', '.')}",
             resource=request.url.path,
             decision="allow",
@@ -71,6 +74,8 @@ class PolicyMiddleware(BaseHTTPMiddleware):
                 service="gateway",
                 event_type="policy_denied",
                 user_id=user.get("user_id"),
+                organization_id=organization_id,
+                tenant_scope="organization" if organization_id is not None else "unknown",
                 action=f"{request.method} {request.url.path}",
                 decision="deny",
                 reason=decision.get("reason", "policy_block"),

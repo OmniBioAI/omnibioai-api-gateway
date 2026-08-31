@@ -115,6 +115,8 @@ async def gateway(service: str, path: str, request: Request):
             service="gateway",
             event_type="upstream_forward",
             user_id=user_id,
+            organization_id=identity.get("organization_id") if identity else None,
+            tenant_scope="organization" if identity and identity.get("organization_id") is not None else "unknown",
             action=f"{request.method} {service}/{path}",
             decision="allow" if status < 400 else "deny",
             trace_id=trace_id,

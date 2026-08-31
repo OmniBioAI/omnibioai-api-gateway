@@ -60,6 +60,26 @@ async def test_emit_calls_redis_xadd():
         audit_client._redis = original
 
 
+async def test_emit_signature_covers_tenant_fields():
+    import json
+    from app.services import audit_client
+
+    mock_redis = AsyncMock()
+    original = audit_client._redis
+    audit_client._redis = mock_redis
+    try:
+        event = audit_client.build_audit_event(
+            service="gateway", event_type="request",
+            organization_id="org-verified", tenant_scope="organization",
+        )
+        await audit_client._emit(event)
+        data = mock_redis.xadd.call_args.args[1]["data"]
+        assert json.loads(data)["organization_id"] == "org-verified"
+        assert audit_client.sign_audit_event("gateway", data, audit_client.Config.JWT_SECRET) == mock_redis.xadd.call_args.args[1]["sig"]
+    finally:
+        audit_client._redis = original
+
+
 async def test_emit_xadd_error_silenced():
     """_emit must swallow redis errors."""
     from app.services import audit_client
@@ -86,7 +106,8 @@ def test_build_audit_event_contains_all_contract_fields():
 
     assert set(event.keys()) == {
         "event_id", "timestamp", "service", "event_type", "user_id",
-        "action", "resource", "decision", "reason", "trace_id", "context",
+        "organization_id", "tenant_scope", "action", "resource", "decision",
+        "reason", "trace_id", "context",
     }
 
 
@@ -127,6 +148,8 @@ def test_build_audit_event_optional_fields_default_none_or_empty():
     event = build_audit_event(service="gateway", event_type="request")
 
     assert event["user_id"] is None
+    assert event["organization_id"] is None
+    assert event["tenant_scope"] == "unknown"
     assert event["action"] == ""
     assert event["resource"] is None
     assert event["decision"] is None
@@ -157,6 +180,31 @@ def test_build_audit_event_passes_through_all_optional_fields():
     assert event["reason"] == "no_permission"
     assert event["trace_id"] == "trace-abc"
     assert event["context"] == {"extra": "data"}
+
+
+def test_tenant_fields_are_top_level_and_context_is_not_authority():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(
+        service="gateway",
+        event_type="request",
+        organization_id="org-verified",
+        tenant_scope="organization",
+        context={"organization_id": "org-untrusted"},
+    )
+
+    assert event["organization_id"] == "org-verified"
+    assert event["tenant_scope"] == "organization"
+    assert event["context"]["organization_id"] == "org-untrusted"
+
+
+def test_missing_tenant_defaults_to_unknown_not_global():
+    from app.services.audit_client import build_audit_event
+
+    event = build_audit_event(service="gateway", event_type="request")
+
+    assert event["organization_id"] is None
+    assert event["tenant_scope"] == "unknown"
 
 
 def test_build_audit_event_context_none_becomes_empty_dict():
