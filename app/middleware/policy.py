@@ -12,7 +12,17 @@ from app.services.audit_client import build_audit_event, fire_audit
 # request would depend on the policy engine's default decision for an
 # unmodeled synthetic path -- untested, unspecified behavior that could
 # 403 a validly authenticated caller and break nginx's auth_request gate.
-_SKIP_PATHS = {"/health", "/", "/auth/verify", "/version"}
+#
+# /docs and /openapi.json are exempted from the token requirement in
+# AuthMiddleware (app/middleware/auth.py) since the OpenAPI spec is
+# public metadata, not a resource access. That means request.state.user
+# is never set for these two paths, so without this same skip-listing
+# they'd unconditionally hit the "if not user: 403" branch below --
+# not a policy decision, just this middleware's default-deny for
+# unauthenticated requests. Same class of gap as /auth/verify above:
+# an unmodeled synthetic path, not a real API-service route, so
+# exempting it doesn't touch actual API access control.
+_SKIP_PATHS = {"/health", "/", "/auth/verify", "/version", "/docs", "/openapi.json"}
 
 
 class PolicyMiddleware(BaseHTTPMiddleware):

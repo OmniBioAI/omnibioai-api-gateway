@@ -4,7 +4,12 @@ from starlette.responses import JSONResponse
 from app.services.iam_client import IAMClient
 from app.services.audit_client import build_audit_event, fire_audit
 
-_SKIP_PATHS = {"/health", "/", "/version"}
+# /docs and /openapi.json are exempted deliberately: the OpenAPI spec is
+# public metadata describing the API's shape, not an access path to any
+# data or action, so it doesn't need a token — matching how auth-service,
+# security-audit, and toolserver all expose their own /docs pages.
+# Every actual API call still goes through the token check below.
+_SKIP_PATHS = {"/health", "/", "/version", "/docs", "/openapi.json"}
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

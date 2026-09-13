@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="OmniBioAI API Gateway", lifespan=lifespan)
+app = FastAPI(title="OmniBioAI API Gateway", lifespan=lifespan, root_path="/_svc/gateway")
 
 # Middleware is applied LIFO: last added = outermost = runs first for requests.
 # Desired request flow:
