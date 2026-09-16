@@ -133,6 +133,14 @@ def build_audit_event(
 
 
 async def _emit(event: dict):
+    # V2-002 (Track E2): previously `except Exception: pass` -- a Redis
+    # XADD failure here (connection refused, auth failure, timeout) was
+    # completely invisible; the audit event simply ceased to exist with
+    # no signal anywhere. This is still fire-and-forget (the caller
+    # already returned by the time this runs -- see fire_audit() below)
+    # so it cannot make the *request* fail, but the failure itself must
+    # never go unlogged again. print() matches this repo's existing
+    # convention (no `logging` module is used anywhere in this app).
     try:
         # `data` is computed exactly once and both signed and published as
         # that same string -- signing a dict and separately re-serializing
@@ -149,18 +157,52 @@ async def _emit(event: dict):
             maxlen=1_000_000,
             approximate=True,
         )
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 -- any XADD failure must be visible, never silently swallowed
+        print(
+            f"[AUDIT] failed to publish audit event to Redis stream {STREAM!r} "
+            f"(event_id={event.get('event_id')!r}, service={event.get('service')!r}, "
+            f"event_type={event.get('event_type')!r}): {type(e).__name__}: {e}"
+        )
 
 
 def fire_audit(event: dict):
-    """Schedule a non-blocking audit write. Never raises."""
+    """Schedule a non-blocking audit write. Never raises.
+
+    V2-002 (Track E2): previously, if no asyncio event loop was running
+    at call time, this function did *nothing at all* -- not even the
+    `except Exception: pass` below fired, because `asyncio.create_task`
+    was simply never reached and no exception occurred. The event was
+    dropped with zero code path executed and zero signal anywhere. Every
+    current call site (app/middleware/*.py) runs inside FastAPI request
+    handling, which is always itself inside a running event loop, so in
+    practice this path is a defensive edge case (e.g. a future caller
+    outside request handling, or during shutdown) rather than the
+    common case -- but "rare" is not "safe to drop silently" for a
+    security audit event. This still does not make publication durable
+    for that case (that would need a synchronous fallback path or
+    requiring every caller to `await audit_log()` instead -- out of
+    scope here per this track's "no massive redesign" boundary); it
+    makes the drop observable instead of invisible, and callers that
+    need a durable guarantee should use `await audit_log()` directly.
+    """
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             asyncio.create_task(_emit(event))
-    except Exception:
-        pass
+        else:
+            print(
+                f"[AUDIT] fire_audit() called with no running event loop -- audit "
+                f"event DROPPED, not published (event_id={event.get('event_id')!r}, "
+                f"service={event.get('service')!r}, event_type={event.get('event_type')!r}). "
+                f"Use 'await audit_log(event)' instead of fire_audit() from a context "
+                f"with no running loop."
+            )
+    except Exception as e:  # noqa: BLE001 -- scheduling failure itself must be visible too
+        print(
+            f"[AUDIT] fire_audit() failed to schedule audit publication -- audit "
+            f"event DROPPED (event_id={event.get('event_id')!r}, "
+            f"service={event.get('service')!r}): {type(e).__name__}: {e}"
+        )
 
 
 async def audit_log(event: dict):

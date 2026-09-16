@@ -23,6 +23,43 @@ async def test_fire_audit_exception_silenced():
         fire_audit({"event": "test"})  # must not raise
 
 
+# ---------------------------------------------------------------------------
+# V2-002 (Track E2): previously, fire_audit() with no running event loop
+# did nothing at all -- no exception, no log, no task, the event simply
+# ceased to exist. Both new failure paths below must now be observable.
+# ---------------------------------------------------------------------------
+
+def test_fire_audit_with_no_running_loop_logs_the_drop_instead_of_silently_dropping(capsys):
+    from app.services.audit_client import fire_audit
+
+    fake_loop = type("FakeLoop", (), {"is_running": lambda self: False})()
+    with patch("app.services.audit_client.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.audit_client.asyncio.create_task") as mock_create:
+        fire_audit({"event_id": "evt-no-loop", "service": "gateway", "event_type": "test"})
+
+    mock_create.assert_not_called()  # confirms the exact old no-op path was reached
+    captured = capsys.readouterr()
+    assert "DROPPED" in captured.out
+    assert "evt-no-loop" in captured.out
+
+
+def test_fire_audit_scheduling_failure_after_get_event_loop_is_also_logged(capsys):
+    """Distinct from the RuntimeError-from-get_event_loop() case above --
+    this covers a failure raised *after* a loop is obtained (e.g.
+    create_task itself raising), which must also be visible, not folded
+    into a bare `except: pass`."""
+    from app.services.audit_client import fire_audit
+
+    fake_loop = type("FakeLoop", (), {"is_running": lambda self: True})()
+    with patch("app.services.audit_client.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.audit_client.asyncio.create_task", side_effect=RuntimeError("no running event loop")):
+        fire_audit({"event_id": "evt-sched-fail", "service": "gateway", "event_type": "test"})
+
+    captured = capsys.readouterr()
+    assert "DROPPED" in captured.out
+    assert "evt-sched-fail" in captured.out
+
+
 async def test_audit_log_calls_fire_audit():
     """audit_log (middleware compat wrapper) must delegate to fire_audit."""
     from app.services.audit_client import audit_log, fire_audit
@@ -81,7 +118,7 @@ async def test_emit_signature_covers_tenant_fields():
 
 
 async def test_emit_xadd_error_silenced():
-    """_emit must swallow redis errors."""
+    """_emit must swallow redis errors (never raise into the caller)."""
     from app.services import audit_client
 
     mock_redis = AsyncMock()
@@ -92,6 +129,30 @@ async def test_emit_xadd_error_silenced():
         await audit_client._emit({"event": "e1"})  # must not raise
     finally:
         audit_client._redis = original
+
+
+async def test_emit_xadd_error_is_logged_not_silently_dropped(capsys):
+    """V2-002 (Track E2): previously `except Exception: pass` -- an XADD
+    failure must now be visible with enough safe identifying detail
+    (event_id/service/event_type) to investigate, without dumping the
+    full event payload/context."""
+    from app.services import audit_client
+
+    mock_redis = AsyncMock()
+    mock_redis.xadd.side_effect = RuntimeError("redis connection refused")
+    original = audit_client._redis
+    audit_client._redis = mock_redis
+    try:
+        await audit_client._emit({
+            "event_id": "evt-xadd-fail", "service": "gateway", "event_type": "policy_denied",
+        })
+    finally:
+        audit_client._redis = original
+
+    captured = capsys.readouterr()
+    assert "evt-xadd-fail" in captured.out
+    assert "gateway" in captured.out
+    assert "redis connection refused" in captured.out
 
 
 # ---------------------------------------------------------------------------
