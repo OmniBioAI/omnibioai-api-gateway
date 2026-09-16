@@ -5,7 +5,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.services.iam_client import IAMClient
+from app.core.config import Config
+from app.services.iam_client import IAMClient, _sign_cache_entry
+
+
+class _FakeAsyncRedis:
+    """In-memory stand-in for the subset of redis.asyncio IAMClient uses --
+    a real backing store is needed for the cache-integrity tests below
+    (roundtrip / tamper / replay), unlike the plain-value AsyncMock the
+    other tests in this file use for the remote-validate flow."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def setex(self, key, ttl, value):
+        self.store[key] = value
+
+    async def delete(self, key):
+        self.store.pop(key, None)
 
 
 @pytest.fixture
@@ -35,9 +55,14 @@ def iam_client():
 
 
 async def test_get_cached_hit(iam_client):
+    """PHI P1-5: a cache hit now requires a valid HMAC prefix -- raw
+    unsigned JSON (the pre-fix shape) is covered separately below by
+    test_get_cached_rejects_unsigned_legacy_entry, which asserts the
+    opposite (rejected, not returned)."""
     client, mock_redis, _ = iam_client
     user = {"user_id": "42", "valid": True}
-    mock_redis.get.return_value = json.dumps(user)
+    body = json.dumps(user)
+    mock_redis.get.return_value = f"{_sign_cache_entry('tok', body)}:{body}"
     result = await client._get_cached("tok")
     assert result == user
     mock_redis.get.assert_called_once_with("gateway:iam:tok")
@@ -56,10 +81,20 @@ async def test_get_cached_redis_error_returns_none(iam_client):
 
 
 async def test_set_cached_calls_setex(iam_client):
+    """PHI P1-5: the stored value is now `<mac>:<json>`, not bare JSON --
+    verify the MAC matches and the body round-trips, rather than asserting
+    the old unsigned exact-bytes shape."""
     client, mock_redis, _ = iam_client
     user = {"user_id": "1"}
     await client._set_cached("tok", user, ttl=60)
-    mock_redis.setex.assert_called_once_with("gateway:iam:tok", 60, json.dumps(user))
+    mock_redis.setex.assert_called_once()
+    key, ttl, value = mock_redis.setex.call_args[0]
+    assert key == "gateway:iam:tok"
+    assert ttl == 60
+    mac, sep, body = value.partition(":")
+    assert sep == ":"
+    assert body == json.dumps(user)
+    assert mac == _sign_cache_entry("tok", body)
 
 
 async def test_set_cached_default_ttl(iam_client):
@@ -90,7 +125,8 @@ async def test_evict_redis_error_silenced(iam_client):
 async def test_validate_cache_hit_returns_cached(iam_client):
     client, mock_redis, mock_http = iam_client
     user = {"user_id": "7", "valid": True}
-    mock_redis.get.return_value = json.dumps(user)
+    body = json.dumps(user)
+    mock_redis.get.return_value = f"{_sign_cache_entry('tok', body)}:{body}"
     result = await client.validate("tok")
     assert result == user
     mock_http.post.assert_not_called()
@@ -190,12 +226,13 @@ async def test_validate_remote_defaults_org_context_when_absent(iam_client):
 
 
 async def test_validate_cache_hit_with_pre_pr3_shaped_entry(iam_client):
-    """Redis mixed-version cache compatibility: a cache entry written by a
-    gateway process running BEFORE this change (no org_id/org_role/
-    schema_version keys at all in the stored JSON, not even null values)
-    must still be read back and used successfully -- this is the actual
-    scenario during a rolling deploy, where old and new gateway instances'
-    cache writes coexist in the same Redis for up to the 300s TTL."""
+    """Redis mixed-version cache-*shape* compatibility (org_id/org_role/
+    schema_version keys absent, not even null) is still honored -- but only
+    once the entry carries a valid HMAC. Sign the legacy-shaped body here so
+    this test still isolates the thing it's meant to cover (missing PR3
+    fields, not the separate unsigned-entry question, which is covered by
+    test_validate_cache_hit_with_legacy_unsigned_entry_falls_through_to_
+    remote below)."""
     client, mock_redis, mock_http = iam_client
     pre_pr3_cached_entry = {
         "user_id": "7",
@@ -204,7 +241,8 @@ async def test_validate_cache_hit_with_pre_pr3_shaped_entry(iam_client):
         "permissions": ["write"],
         "valid": True,
     }
-    mock_redis.get.return_value = json.dumps(pre_pr3_cached_entry)
+    body = json.dumps(pre_pr3_cached_entry)
+    mock_redis.get.return_value = f"{_sign_cache_entry('tok', body)}:{body}"
 
     result = await client.validate("tok")
 
@@ -215,6 +253,34 @@ async def test_validate_cache_hit_with_pre_pr3_shaped_entry(iam_client):
     # all, distinguishing it from a fresh v2 response where org_id is
     # explicitly present as None.
     assert pre_pr3_cached_entry.get("org_id") is None
+
+
+async def test_validate_cache_hit_with_legacy_unsigned_entry_falls_through_to_remote(iam_client):
+    """PHI P1-5: a cache entry written before this fix existed (raw JSON,
+    no HMAC prefix at all -- the exact shape the OLD version of this test
+    asserted was trusted outright) must now be rejected and fall through to
+    a real /auth/validate round trip, not returned as a trusted identity.
+    This is the deliberate contract change this remediation makes: a
+    pre-fix entry self-heals (gets evicted, re-cached signed on next
+    validate) instead of being grandfathered in as trusted."""
+    client, mock_redis, mock_http = iam_client
+    legacy_unsigned_entry = {
+        "user_id": "7", "email": "u@test.com", "roles": ["admin"],
+        "permissions": ["write"], "valid": True,
+    }
+    mock_redis.get.return_value = json.dumps(legacy_unsigned_entry)
+    resp = MagicMock()
+    resp.json.return_value = {
+        "valid": True, "user_id": "7", "email": "u@test.com",
+        "roles": ["admin"], "permissions": ["write"],
+    }
+    mock_http.post.return_value = resp
+
+    result = await client.validate("tok")
+
+    mock_redis.delete.assert_called_once_with("gateway:iam:tok")
+    mock_http.post.assert_called_once()
+    assert result["user_id"] == "7"
 
 
 async def test_validate_remote_invalid_evicts_and_returns_none(iam_client):
@@ -389,3 +455,133 @@ async def test_validate_local_decode_success_proceeds_to_remote_call(iam_client)
 
     assert result is not None
     mock_http.post.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# PHI P1-5 remediation: IAM Redis-cache integrity (HMAC signing).
+#
+# Mirrors omnibioai-tes's tests/test_iam_integration.py::TestCacheIntegrity
+# (the reference pattern for this fix across the platform) rather than
+# inventing a different shape. Uses a real in-memory fake Redis (see
+# _FakeAsyncRedis above) instead of the plain-value AsyncMock the rest of
+# this file uses, since roundtrip/tamper/replay scenarios need genuine
+# read-your-own-write state, not a fixed canned return value.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def signed_cache_client():
+    fake_redis = _FakeAsyncRedis()
+    mock_http = AsyncMock()
+    with (
+        patch("app.services.iam_client.aioredis.from_url", return_value=fake_redis),
+        patch("app.services.iam_client.httpx.AsyncClient", return_value=mock_http),
+    ):
+        client = IAMClient("http://iam-service", "redis://localhost")
+    client._shared = AsyncMock()
+    client._shared.decode_token = AsyncMock(return_value={"sub": "test-user", "roles": [], "permissions": []})
+    return client, fake_redis, mock_http
+
+
+class TestCacheIntegrity:
+    async def test_roundtrip_returns_exactly_what_was_cached(self, signed_cache_client):
+        client, _, _ = signed_cache_client
+        user = {"user_id": "u1", "org_id": "org_a", "permissions": ["write"], "valid": True}
+        await client._set_cached("tok-1", user)
+        assert await client._get_cached("tok-1") == user
+
+    async def test_entry_written_directly_to_redis_is_rejected(self, signed_cache_client):
+        """The exact live-proven attack class (TES PR #22): something with
+        Redis write access (not this process) sets `gateway:iam:<token>` to
+        attacker-chosen JSON with no valid MAC prefix -- must be treated as
+        a cache miss, not a trusted identity, and evicted so a second,
+        cheaper read can't accidentally trust it either."""
+        client, fake_redis, _ = signed_cache_client
+        forged = json.dumps({"user_id": "attacker", "org_id": "any-org", "roles": ["admin"], "permissions": ["write"], "valid": True})
+        await fake_redis.setex("gateway:iam:forged-token", 60, forged)
+        assert await client._get_cached("forged-token") is None
+        assert "gateway:iam:forged-token" not in fake_redis.store
+
+    async def test_legacy_unsigned_entry_from_before_this_fix_is_a_clean_miss(self, signed_cache_client):
+        client, fake_redis, _ = signed_cache_client
+        await fake_redis.setex("gateway:iam:old-token", 60, json.dumps({"user_id": "u1", "valid": True}))
+        assert await client._get_cached("old-token") is None
+
+    async def test_tampered_body_with_stale_mac_is_rejected(self, signed_cache_client):
+        """Flip a byte in an otherwise legitimately-signed entry's body
+        (e.g. escalate permissions after the fact) -- the MAC no longer
+        matches and the entry must be rejected, not silently accepted with
+        the tampered value."""
+        client, fake_redis, _ = signed_cache_client
+        user = {"user_id": "u1", "org_id": "org_a", "roles": [], "permissions": [], "valid": True}
+        await client._set_cached("tok-2", user)
+        raw = fake_redis.store["gateway:iam:tok-2"]
+        mac, _, body = raw.partition(":")
+        tampered_body = body.replace('"permissions": []', '"permissions": ["admin"]')
+        fake_redis.store["gateway:iam:tok-2"] = f"{mac}:{tampered_body}"
+        assert await client._get_cached("tok-2") is None
+
+    async def test_wrong_key_signed_entry_is_rejected(self, signed_cache_client, monkeypatch):
+        """An entry legitimately signed under a *different* JWT_SECRET (a
+        cross-secret/cross-environment or rotated-secret entry) must not
+        verify here."""
+        client, fake_redis, _ = signed_cache_client
+        with patch("app.services.iam_client.Config.JWT_SECRET", "a-different-secret"):
+            await client._set_cached("tok-3", {"user_id": "u1", "valid": True})
+        assert await client._get_cached("tok-3") is None
+
+    async def test_cross_token_replay_is_rejected(self, signed_cache_client):
+        """An attacker with Redis read+write access reads a legitimately
+        signed entry cached under someone else's real token and copies it
+        verbatim onto a token of their own choosing. Binding the token into
+        the MAC (not just the body) must reject this."""
+        client, fake_redis, _ = signed_cache_client
+        real_user = {"user_id": "victim", "org_id": "org_a", "roles": [], "permissions": ["write"], "valid": True}
+        await client._set_cached("victim-real-token", real_user)
+        stolen_blob = fake_redis.store["gateway:iam:victim-real-token"]
+        await fake_redis.setex("gateway:iam:attacker-chosen-token", 60, stolen_blob)
+        assert await client._get_cached("attacker-chosen-token") is None
+        assert await client._get_cached("victim-real-token") == real_user
+
+    async def test_validate_falls_through_to_real_check_when_cache_is_forged(self, signed_cache_client):
+        """End-to-end through validate(): a forged cache entry must not
+        short-circuit local decode / remote /auth/validate -- it must
+        behave exactly like an ordinary cache miss, and the attacker-chosen
+        roles/org_id/user_id in the forged entry must never become the
+        value validate() returns."""
+        client, fake_redis, mock_http = signed_cache_client
+        forged = json.dumps({"user_id": "attacker", "org_id": "any-org", "roles": ["superadmin"], "permissions": ["*"], "valid": True})
+        await fake_redis.setex("gateway:iam:forged-token", 60, forged)
+
+        resp = MagicMock()
+        resp.json.return_value = {
+            "valid": True, "user_id": "real-user", "email": "u@test.com",
+            "roles": ["user"], "permissions": ["read"],
+        }
+        mock_http.post.return_value = resp
+
+        result = await client.validate("forged-token")
+
+        client._shared.decode_token.assert_awaited_once()
+        mock_http.post.assert_called_once()
+        assert result["user_id"] == "real-user"
+        assert result["roles"] == ["user"]
+        assert "attacker" not in json.dumps(result)
+        assert "superadmin" not in json.dumps(result)
+
+    async def test_validate_cache_miss_still_authenticates_normally(self, signed_cache_client):
+        client, fake_redis, mock_http = signed_cache_client
+        resp = MagicMock()
+        resp.json.return_value = {
+            "valid": True, "user_id": "u1", "email": "u@test.com",
+            "roles": [], "permissions": [],
+        }
+        mock_http.post.return_value = resp
+
+        result = await client.validate("fresh-token")
+
+        assert result["user_id"] == "u1"
+        mock_http.post.assert_called_once()
+        # Re-cached, and now signed -- a second validate() is a genuine hit.
+        second = await client.validate("fresh-token")
+        assert second == result
+        mock_http.post.assert_called_once()  # not called again

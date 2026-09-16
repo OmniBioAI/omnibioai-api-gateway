@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 from typing import Callable, Optional
 
@@ -6,6 +8,44 @@ import redis.asyncio as aioredis
 from iam_client import AsyncIAMClient as _SharedIAMClient
 
 from app.core.config import Config
+
+
+# PHI P1-5 remediation (Redis IAM-cache integrity): this class's own cache
+# (below) trusted whatever JSON it read back from `gateway:iam:<token>`
+# completely -- no signature check -- exactly the bug omnibioai-tes's PR #22
+# fixed for its own independent cache, and which the shared
+# omnibioai-iam-client package (v0.1.4+) now also supports fixing via its
+# cache_secret constructor param. This class doesn't inherit from that
+# package's AsyncIAMClient (see the class docstring below for why: it's used
+# here only for decode_token(), never for caching), so that opt-in feature
+# can't be enabled here -- the same HMAC-SHA256 scheme is reimplemented
+# locally instead, deliberately matching TES's algorithm (see
+# omnibioai-tes/src/omnibioai_tool_exec/service/security/iam.py) rather than
+# inventing a different one.
+#
+# Fix: HMAC-sign each cache entry with a key derived from Config.JWT_SECRET
+# (the one secret this service already has -- no new secret, no env/compose
+# change) over *both* the token and the cached body. Binding the token into
+# the MAC (not just the body) stops an attacker with Redis read+write access
+# from copying a legitimately-signed entry observed under one token onto a
+# key of their own choosing (a cross-token replay). The MAC key is derived
+# with a "gateway-iam-cache-mac:" prefix distinct from TES's own
+# "tes-iam-cache-mac:" prefix, so a signed entry from one service's
+# namespace can never verify under another's, even if both happened to share
+# the same JWT_SECRET value.
+#
+# A tampered, forged, malformed, or pre-fix-unsigned entry is treated as a
+# cache miss (evicted, falls through to the real /auth/validate check),
+# never as a valid identity -- this does NOT address confidentiality (Redis
+# read access still exposes cached permissions/org_id/email) or the
+# audit-stream tamper surface, both separate, already-tracked residual
+# risks.
+def _cache_mac_key() -> bytes:
+    return hashlib.sha256(f"gateway-iam-cache-mac:{Config.JWT_SECRET}".encode()).digest()
+
+
+def _sign_cache_entry(token: str, body: str) -> str:
+    return hmac.new(_cache_mac_key(), f"{token}\n{body}".encode(), hashlib.sha256).hexdigest()
 
 
 class IAMClient:
@@ -68,13 +108,23 @@ class IAMClient:
     async def _get_cached(self, token: str) -> Optional[dict]:
         try:
             raw = await self.redis.get(f"{self._CACHE_PREFIX}{token}")
-            return json.loads(raw) if raw else None
+            if not raw:
+                return None
+            mac, sep, body = raw.partition(":")
+            # `sep` guards the pre-fix / no-colon-at-all shape (malformed,
+            # truncated, or legacy unsigned data) -- treated exactly like a
+            # MAC mismatch, never trusted, never a crash.
+            if not sep or not hmac.compare_digest(mac, _sign_cache_entry(token, body)):
+                await self.evict(token)
+                return None
+            return json.loads(body)
         except Exception:
             return None
 
     async def _set_cached(self, token: str, user: dict, ttl: int = 300):
         try:
-            await self.redis.setex(f"{self._CACHE_PREFIX}{token}", ttl, json.dumps(user))
+            body = json.dumps(user)
+            await self.redis.setex(f"{self._CACHE_PREFIX}{token}", ttl, f"{_sign_cache_entry(token, body)}:{body}")
         except Exception:
             pass
 
