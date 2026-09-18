@@ -1,4 +1,11 @@
-"""Tests for app/core/proxy.py — ProxyClient unit tests."""
+"""ProxyClient.forward() must faithfully relay a proxied request's method,
+url, headers, and body to the upstream service, return its status/JSON
+body on success, and fail closed with a 500 "upstream_failure" response
+(never an unhandled exception) whenever the upstream call itself raises.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
 from unittest.mock import AsyncMock, MagicMock, patch
 
 

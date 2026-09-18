@@ -5,6 +5,9 @@ HPC_COMPUTE_SERVICES = {"tes", "toolserver", "workbench"}.
 The middleware is only applied to these services.
 HPCPolicyClient.evaluate() returns {"allow": bool, "reason": str}.
 Denial → 403 {"error": "HPC quota exceeded", "reason": ...}.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +18,8 @@ from app.services.hpc_policy_client import HPC_COMPUTE_SERVICES
 
 
 def test_hpc_denial_returns_403(client, valid_user):
+    """HPCPolicyClient.evaluate() reporting allow=False -> 403 "HPC quota
+    exceeded" with its reason string forwarded in the response body."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -36,6 +41,7 @@ def test_hpc_denial_returns_403(client, valid_user):
 
 
 def test_hpc_approval_passes_through(client, valid_user):
+    """HPCPolicyClient.evaluate() reporting allow=True does not 403."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -70,10 +76,12 @@ def test_hpc_not_called_for_non_compute_service(client, valid_user):
 
 @pytest.mark.parametrize("service", sorted(HPC_COMPUTE_SERVICES))
 def test_is_compute_service_true_for_known_services(service):
+    """is_compute_service() is True for every HPC_COMPUTE_SERVICES entry."""
     assert _main_mod.hpc.is_compute_service(service) is True
 
 
 def test_is_compute_service_false_for_unknown():
+    """is_compute_service() is False for a service not in the HPC set."""
     assert _main_mod.hpc.is_compute_service("unknown-service") is False
 
 

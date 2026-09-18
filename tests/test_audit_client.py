@@ -1,4 +1,16 @@
-"""Tests for app/services/audit_client.py and app/middleware/audit.py audit_log."""
+"""fire_audit() must schedule/emit best-effort and never raise into its
+caller regardless of what fails (no running loop, scheduling failure,
+Redis XADD failure), while still making every drop visible via a logged
+"DROPPED" line rather than silently discarding the event. build_audit_event()
+must produce the one audit-event contract every producer in this repo
+uses: a fixed field set, fresh UUID/ISO-8601 timestamp per call, safe
+defaults, tenant fields that are trusted top-level data (never read back
+from the caller-controlled `context`), and independent (never shared)
+default dicts across calls.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
 import asyncio
 import uuid
 from datetime import datetime
@@ -30,6 +42,9 @@ async def test_fire_audit_exception_silenced():
 # ---------------------------------------------------------------------------
 
 def test_fire_audit_with_no_running_loop_logs_the_drop_instead_of_silently_dropping(capsys):
+    """V2-002: when get_event_loop() returns a non-running loop, fire_audit
+    must not schedule anything, but it must print a "DROPPED" line naming
+    the event_id rather than discarding the event with no trace at all."""
     from app.services.audit_client import fire_audit
 
     fake_loop = type("FakeLoop", (), {"is_running": lambda self: False})()
@@ -98,6 +113,10 @@ async def test_emit_calls_redis_xadd():
 
 
 async def test_emit_signature_covers_tenant_fields():
+    """The signature _emit attaches is computed over the exact wire "data"
+    string, so tenant fields (organization_id here) are covered by it just
+    like every other field -- confirmed by recomputing the same signature
+    independently via sign_audit_event()."""
     import json
     from app.services import audit_client
 
@@ -161,6 +180,8 @@ async def test_emit_xadd_error_is_logged_not_silently_dropped(capsys):
 # ---------------------------------------------------------------------------
 
 def test_build_audit_event_contains_all_contract_fields():
+    """build_audit_event()'s output has exactly the CONTRACT_FIELDS set
+    used by every producer in this repo -- no more, no less."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(service="gateway", event_type="request")
@@ -186,6 +207,7 @@ def test_build_audit_event_generates_unique_event_id_per_call():
 
 
 def test_build_audit_event_timestamp_is_iso8601():
+    """The generated "timestamp" field is a valid ISO-8601 string."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(service="gateway", event_type="request")
@@ -195,6 +217,7 @@ def test_build_audit_event_timestamp_is_iso8601():
 
 
 def test_build_audit_event_required_fields_set():
+    """The caller-supplied service/event_type land unchanged on the event."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(service="gateway", event_type="policy_denied")
@@ -204,6 +227,9 @@ def test_build_audit_event_required_fields_set():
 
 
 def test_build_audit_event_optional_fields_default_none_or_empty():
+    """Every optional field has a safe default when the caller omits it:
+    None for identity/detail fields, "unknown" for tenant_scope, "" for
+    action, {} for context."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(service="gateway", event_type="request")
@@ -220,6 +246,8 @@ def test_build_audit_event_optional_fields_default_none_or_empty():
 
 
 def test_build_audit_event_passes_through_all_optional_fields():
+    """Every optional keyword argument the caller does supply reaches the
+    output event unchanged."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(
@@ -244,6 +272,10 @@ def test_build_audit_event_passes_through_all_optional_fields():
 
 
 def test_tenant_fields_are_top_level_and_context_is_not_authority():
+    """organization_id/tenant_scope are trusted top-level fields set by the
+    caller directly, never read back out of the caller-controlled
+    `context` dict -- a mismatched organization_id inside context is left
+    alone and does not override the real, top-level value."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(
@@ -260,6 +292,9 @@ def test_tenant_fields_are_top_level_and_context_is_not_authority():
 
 
 def test_missing_tenant_defaults_to_unknown_not_global():
+    """When a caller omits tenant_scope entirely, the event defaults to
+    "unknown" rather than something that could be misread as a
+    platform-wide/"global" scope."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(service="gateway", event_type="request")
@@ -269,6 +304,7 @@ def test_missing_tenant_defaults_to_unknown_not_global():
 
 
 def test_build_audit_event_context_none_becomes_empty_dict():
+    """Passing context=None explicitly normalizes to {}, not None."""
     from app.services.audit_client import build_audit_event
 
     event = build_audit_event(service="gateway", event_type="request", context=None)

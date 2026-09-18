@@ -1,4 +1,17 @@
-"""Tests for app/services/iam_client.py — IAMClient unit tests."""
+"""IAMClient (app/services/iam_client.py): Redis-backed token-validation
+cache (get/set/evict), the validate() flow combining local decode_token()
+pre-check + cache + remote /auth/validate with timeout-retry and
+fail-closed error handling, org-context propagation/normalization, and
+pub/sub cache invalidation. Also covers the PHI P1-5 HMAC cache-signing
+remediation (TestCacheIntegrity): a cache entry with no valid MAC, a
+tampered body, a cross-secret signature, or a replayed token must all be
+rejected as a clean miss rather than trusted, and validate() must fall
+through to a real check rather than ever surfacing attacker-controlled
+cache content.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,6 +43,9 @@ class _FakeAsyncRedis:
 
 @pytest.fixture
 def iam_client():
+    """A real IAMClient built against mocked Redis/httpx, returned as
+    (client, mock_redis, mock_http) with local decode_token() stubbed to
+    succeed so tests focus on the cache/remote-validate flow below it."""
     # Use MagicMock so pubsub() returns a plain mock (not a coroutine).
     # Async methods are explicitly overridden with AsyncMock.
     mock_redis = MagicMock()
@@ -69,12 +85,15 @@ async def test_get_cached_hit(iam_client):
 
 
 async def test_get_cached_miss_returns_none(iam_client):
+    """No cached entry for the token -- _get_cached returns None."""
     client, mock_redis, _ = iam_client
     mock_redis.get.return_value = None
     assert await client._get_cached("tok") is None
 
 
 async def test_get_cached_redis_error_returns_none(iam_client):
+    """A Redis error on GET fails safe: treated as a cache miss, not
+    propagated as an exception."""
     client, mock_redis, _ = iam_client
     mock_redis.get.side_effect = ConnectionError("redis down")
     assert await client._get_cached("tok") is None
@@ -98,6 +117,7 @@ async def test_set_cached_calls_setex(iam_client):
 
 
 async def test_set_cached_default_ttl(iam_client):
+    """Calling _set_cached without an explicit ttl uses the 300s default."""
     client, mock_redis, _ = iam_client
     await client._set_cached("tok", {"user_id": "1"})
     args = mock_redis.setex.call_args[0]
@@ -105,24 +125,28 @@ async def test_set_cached_default_ttl(iam_client):
 
 
 async def test_set_cached_redis_error_silenced(iam_client):
+    """A Redis error on SETEX is swallowed -- caching is best-effort."""
     client, mock_redis, _ = iam_client
     mock_redis.setex.side_effect = RuntimeError("redis down")
     await client._set_cached("tok", {"user_id": "1"})  # must not raise
 
 
 async def test_evict_calls_delete(iam_client):
+    """evict() deletes the token's cache key under the gateway:iam: prefix."""
     client, mock_redis, _ = iam_client
     await client.evict("tok")
     mock_redis.delete.assert_called_once_with("gateway:iam:tok")
 
 
 async def test_evict_redis_error_silenced(iam_client):
+    """A Redis error on DELETE is swallowed rather than raised."""
     client, mock_redis, _ = iam_client
     mock_redis.delete.side_effect = RuntimeError("redis down")
     await client.evict("tok")  # must not raise
 
 
 async def test_validate_cache_hit_returns_cached(iam_client):
+    """A signed cache hit is returned directly, with no remote HTTP call."""
     client, mock_redis, mock_http = iam_client
     user = {"user_id": "7", "valid": True}
     body = json.dumps(user)
@@ -133,6 +157,8 @@ async def test_validate_cache_hit_returns_cached(iam_client):
 
 
 async def test_validate_remote_valid_returns_user(iam_client):
+    """A cache miss falls through to /auth/validate; a valid response's
+    fields (user_id/email/roles/valid) are returned in the result dict."""
     client, mock_redis, mock_http = iam_client
     mock_redis.get.return_value = None
     resp = MagicMock()
@@ -284,6 +310,8 @@ async def test_validate_cache_hit_with_legacy_unsigned_entry_falls_through_to_re
 
 
 async def test_validate_remote_invalid_evicts_and_returns_none(iam_client):
+    """A {"valid": False} remote response returns None and evicts any
+    stale cache entry for the token."""
     client, mock_redis, mock_http = iam_client
     mock_redis.get.return_value = None
     resp = MagicMock()
@@ -295,6 +323,8 @@ async def test_validate_remote_invalid_evicts_and_returns_none(iam_client):
 
 
 async def test_validate_timeout_first_attempt_retries_and_succeeds(iam_client):
+    """A timeout on the first /auth/validate attempt is retried once and,
+    on success, returns the second attempt's result."""
     client, mock_redis, mock_http = iam_client
     mock_redis.get.return_value = None
     resp = MagicMock()
@@ -312,6 +342,8 @@ async def test_validate_timeout_first_attempt_retries_and_succeeds(iam_client):
 
 
 async def test_validate_timeout_both_attempts_returns_none(iam_client):
+    """A timeout on both /auth/validate attempts fails closed: None, not
+    an unhandled exception."""
     client, mock_redis, mock_http = iam_client
     mock_redis.get.return_value = None
     mock_http.post.side_effect = httpx.TimeoutException("t/o")
@@ -319,6 +351,8 @@ async def test_validate_timeout_both_attempts_returns_none(iam_client):
 
 
 async def test_validate_generic_exception_returns_none(iam_client):
+    """Any non-timeout exception from the remote call also fails closed
+    to None rather than propagating."""
     client, mock_redis, mock_http = iam_client
     mock_redis.get.return_value = None
     mock_http.post.side_effect = RuntimeError("network error")
@@ -326,6 +360,9 @@ async def test_validate_generic_exception_returns_none(iam_client):
 
 
 async def test_subscribe_invalidation_calls_callback_on_message(iam_client):
+    """Each pubsub "message" event with a JSON {user_id, token} payload
+    invokes the callback with those two values, in order; the initial
+    "subscribe" ack event is ignored."""
     client, mock_redis, _ = iam_client
     received = []
 
@@ -354,6 +391,8 @@ async def test_subscribe_invalidation_calls_callback_on_message(iam_client):
 
 
 async def test_subscribe_invalidation_bad_json_silenced(iam_client):
+    """A non-JSON message payload is swallowed -- the callback is never
+    invoked and no exception escapes."""
     client, mock_redis, _ = iam_client
     called = []
 
@@ -375,6 +414,8 @@ async def test_subscribe_invalidation_bad_json_silenced(iam_client):
 
 
 async def test_subscribe_invalidation_callback_exception_silenced(iam_client):
+    """An exception raised by the caller's own callback must not escape
+    subscribe_invalidation() or abort the listen loop."""
     client, mock_redis, _ = iam_client
 
     async def on_invalidate(user_id, token):
@@ -393,6 +434,9 @@ async def test_subscribe_invalidation_callback_exception_silenced(iam_client):
 
 
 async def test_subscribe_invalidation_missing_fields_defaults(iam_client):
+    """A message payload missing user_id/token entirely still invokes the
+    callback, defaulting both to empty strings rather than raising a
+    KeyError."""
     client, mock_redis, _ = iam_client
     received = []
 
@@ -470,6 +514,9 @@ async def test_validate_local_decode_success_proceeds_to_remote_call(iam_client)
 
 @pytest.fixture
 def signed_cache_client():
+    """A real IAMClient backed by _FakeAsyncRedis (genuine read-your-own-
+    write state, unlike the plain-value AsyncMock the rest of this file
+    uses), returned as (client, fake_redis, mock_http)."""
     fake_redis = _FakeAsyncRedis()
     mock_http = AsyncMock()
     with (
@@ -483,7 +530,13 @@ def signed_cache_client():
 
 
 class TestCacheIntegrity:
+    """PHI P1-5: HMAC-signed IAM cache entries -- a valid roundtrip must
+    still work, and every way an entry could be forged, tampered,
+    cross-secret, or replayed must be rejected as a clean cache miss."""
+
     async def test_roundtrip_returns_exactly_what_was_cached(self, signed_cache_client):
+        """A value written via _set_cached and read back via _get_cached
+        round-trips unchanged."""
         client, _, _ = signed_cache_client
         user = {"user_id": "u1", "org_id": "org_a", "permissions": ["write"], "valid": True}
         await client._set_cached("tok-1", user)
@@ -502,6 +555,8 @@ class TestCacheIntegrity:
         assert "gateway:iam:forged-token" not in fake_redis.store
 
     async def test_legacy_unsigned_entry_from_before_this_fix_is_a_clean_miss(self, signed_cache_client):
+        """A raw-JSON entry with no MAC prefix at all (the pre-fix shape)
+        is rejected as a cache miss, not trusted as a legacy format."""
         client, fake_redis, _ = signed_cache_client
         await fake_redis.setex("gateway:iam:old-token", 60, json.dumps({"user_id": "u1", "valid": True}))
         assert await client._get_cached("old-token") is None
@@ -569,6 +624,9 @@ class TestCacheIntegrity:
         assert "superadmin" not in json.dumps(result)
 
     async def test_validate_cache_miss_still_authenticates_normally(self, signed_cache_client):
+        """An ordinary cache miss still validates remotely, and the result
+        is re-cached signed so a second validate() is a genuine hit
+        without a second remote call."""
         client, fake_redis, mock_http = signed_cache_client
         resp = MagicMock()
         resp.json.return_value = {

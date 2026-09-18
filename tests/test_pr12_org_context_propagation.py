@@ -22,6 +22,9 @@ diagram above, documented here rather than silently worked around --
 adding those routes would be a SERVICE_MAP/routing change, not an
 authorization-hardening one, and is out of this PR's scope (see this PR's
 report).
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 from unittest.mock import AsyncMock, patch
 
@@ -41,6 +44,9 @@ ORG_AWARE_USER = {
 
 @pytest.mark.parametrize("service", sorted(SERVICE_MAP.keys()))
 def test_org_context_reaches_every_mapped_service(client, service):
+    """Forward the authenticated user's org_id, user_id, and permission
+    set to every SERVICE_MAP-mapped backend, via the shared X-Organization-
+    ID/X-User-Id/X-Permissions headers, on the generic gateway route."""
     mock_forward = AsyncMock(return_value=(200, {"ok": True}))
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=ORG_AWARE_USER)),

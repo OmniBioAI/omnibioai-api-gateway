@@ -10,6 +10,15 @@ Known service → proxy attempt. ProxyClient.forward() is mocked (see
                 that need failure behavior override the mock themselves and
                 assert the gateway now propagates the real upstream status
                 code instead of always returning 200.
+
+Also covers identity-header propagation (X-User-Id/X-Organization-ID/
+X-Permissions/X-Client-ID/X-Token-Type/X-Internal-Service/Authorization)
+and the tenant-isolation fix ensuring a client-forged copy of any of
+those reserved headers is dropped rather than surviving alongside the
+gateway's own value.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -19,6 +28,8 @@ from app.core.router import SERVICE_MAP
 
 
 def test_unknown_service_returns_error_body(client, valid_user):
+    """An authenticated request to a service slug absent from SERVICE_MAP
+    returns HTTP 200 with {"error": "unknown service"}, not a 404/500."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -55,6 +66,7 @@ def test_known_service_does_not_return_unknown_error(client, valid_user):
 
 
 def test_service_map_contains_expected_services():
+    """SERVICE_MAP must still contain every core platform service slug."""
     for svc in ("workbench", "tes", "toolserver", "model-registry", "rag"):
         assert svc in SERVICE_MAP, f"{svc} missing from SERVICE_MAP"
 
@@ -97,6 +109,8 @@ def test_gateway_audit_emit_exception_silenced(client, valid_user):
 # ---------------------------------------------------------------------------
 
 def test_authenticated_request_forwards_authorization_header(client, valid_user):
+    """The client's Authorization header is forwarded to the upstream
+    call alongside the pre-existing identity headers."""
     mock_forward = AsyncMock(return_value=(200, {"ok": True}))
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
@@ -231,6 +245,9 @@ def test_x_user_id_still_present_alongside_authorization(client, valid_user):
 # ---------------------------------------------------------------------------
 
 def test_identity_headers_forwarded_for_user_token(client):
+    """A user-token identity's org_id/permissions reach the upstream call
+    as X-Organization-ID/X-Permissions, X-Client-ID is empty, and
+    X-Token-Type is "user"."""
     mock_forward = AsyncMock(return_value=(200, {"ok": True}))
     user = {
         "user_id": "123",
@@ -280,6 +297,8 @@ def test_unauthenticated_request_behavior_unchanged(client):
 
 
 def test_invalid_token_request_behavior_unchanged(client):
+    """An Authorization header that fails IAM validation still yields the
+    same 401 {"error": "invalid token"} response as before this PR."""
     with patch.object(_main_mod.iam, "validate", AsyncMock(return_value=None)):
         resp = client.get(
             "/workbench/ping", headers={"Authorization": "Bearer not-a-valid-token"}
@@ -375,6 +394,8 @@ def test_client_supplied_lowercase_organization_id_header_does_not_reach_upstrea
 
 
 def test_client_supplied_user_id_header_does_not_reach_upstream(client, valid_user):
+    """A client-forged X-User-Id must never be sent -- only the gateway's
+    own, JWT-derived value."""
     mock_forward = AsyncMock(return_value=(200, {"ok": True}))
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
@@ -416,6 +437,8 @@ def test_client_supplied_permissions_header_does_not_reach_upstream(client, vali
 
 
 def test_client_supplied_client_id_and_token_type_headers_do_not_reach_upstream(client, valid_user):
+    """Client-forged X-Client-ID/X-Token-Type must not survive -- only the
+    gateway's own values (empty client id, token_type="user" here)."""
     mock_forward = AsyncMock(return_value=(200, {"ok": True}))
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),

@@ -1,4 +1,12 @@
-"""Tests for app/services/policy_client.py — PolicyClient unit tests."""
+"""PolicyClient.evaluate() must build the correct /policy/evaluate
+request (payload fields, service-to-service headers), retry once on a
+timeout before failing closed with a "policy_timeout" reason, and fail
+closed with "policy_error" on any other exception -- never raise past
+the caller or silently allow.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -9,6 +17,8 @@ from app.services.policy_client import PolicyClient
 
 @pytest.fixture
 def policy_client():
+    """A real PolicyClient built against a mocked httpx.AsyncClient;
+    returns (client, mock_http) so tests can assert on the mock's calls."""
     mock_http = AsyncMock()
     with patch("app.services.policy_client.httpx.AsyncClient", return_value=mock_http):
         client = PolicyClient("http://policy-service")
@@ -24,6 +34,7 @@ _USER = {
 
 
 async def test_evaluate_success(policy_client):
+    """A successful POST returns the policy engine's JSON response as-is."""
     client, mock_http = policy_client
     resp = MagicMock()
     resp.json.return_value = {"allowed": True}
@@ -33,6 +44,8 @@ async def test_evaluate_success(policy_client):
 
 
 async def test_evaluate_sends_correct_payload(policy_client):
+    """The POST body carries user_id, the resource path, and an
+    action string derived as "<lowercased method>.<slashes-to-dots path>"."""
     client, mock_http = policy_client
     resp = MagicMock()
     resp.json.return_value = {"allowed": True}
@@ -46,6 +59,8 @@ async def test_evaluate_sends_correct_payload(policy_client):
 
 
 async def test_evaluate_sends_correct_headers(policy_client):
+    """The POST carries X-Internal-Service, the caller's trace id, and
+    the requesting user's id as request headers."""
     client, mock_http = policy_client
     resp = MagicMock()
     resp.json.return_value = {"allowed": False}
@@ -58,6 +73,8 @@ async def test_evaluate_sends_correct_headers(policy_client):
 
 
 async def test_evaluate_timeout_first_attempt_retries(policy_client):
+    """A timeout on the first POST attempt is retried once and, on
+    success, returns the second attempt's result."""
     client, mock_http = policy_client
     resp = MagicMock()
     resp.json.return_value = {"allowed": True}
@@ -68,6 +85,8 @@ async def test_evaluate_timeout_first_attempt_retries(policy_client):
 
 
 async def test_evaluate_timeout_both_attempts_returns_policy_timeout(policy_client):
+    """A timeout on both attempts fails closed: {"allowed": False,
+    "reason": "policy_timeout"}, not an unhandled exception."""
     client, mock_http = policy_client
     mock_http.post.side_effect = httpx.TimeoutException("t/o")
     result = await client.evaluate(_USER, "/p", "GET")
@@ -75,6 +94,8 @@ async def test_evaluate_timeout_both_attempts_returns_policy_timeout(policy_clie
 
 
 async def test_evaluate_generic_exception_returns_policy_error(policy_client):
+    """Any non-timeout exception from the POST fails closed with
+    {"allowed": False, "reason": "policy_error"}."""
     client, mock_http = policy_client
     mock_http.post.side_effect = RuntimeError("conn refused")
     result = await client.evaluate(_USER, "/p", "GET")
@@ -82,6 +103,7 @@ async def test_evaluate_generic_exception_returns_policy_error(policy_client):
 
 
 async def test_evaluate_default_trace_id(policy_client):
+    """evaluate() works with no explicit trace_id argument supplied."""
     client, mock_http = policy_client
     resp = MagicMock()
     resp.json.return_value = {"allowed": True}
@@ -91,6 +113,8 @@ async def test_evaluate_default_trace_id(policy_client):
 
 
 async def test_evaluate_empty_user_fields(policy_client):
+    """An empty user dict is still forwarded (no KeyError), and the
+    policy engine's own denial response is returned unchanged."""
     client, mock_http = policy_client
     resp = MagicMock()
     resp.json.return_value = {"allowed": False, "reason": "no_perms"}
@@ -114,6 +138,8 @@ async def test_evaluate_sends_org_id(policy_client):
 
 
 async def test_evaluate_org_id_none_when_absent(policy_client):
+    """A user dict with no org_id sends org_id: None, not a missing key
+    or an error -- the Policy Engine can distinguish "no org" from "not sent"."""
     client, mock_http = policy_client
     resp = MagicMock()
     resp.json.return_value = {"allowed": True}

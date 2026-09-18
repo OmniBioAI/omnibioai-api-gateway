@@ -11,6 +11,9 @@ ways: this file's CONTRACT_FIELDS assertion, applied identically to every
 producer regardless of which module/middleware emitted it: and a static
 grep-style check that every fire_audit/_emit/audit_log call site in the
 codebase routes through build_audit_event.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 import ast
 import asyncio
@@ -31,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _captured_events(mock_xadd) -> list[dict]:
+    """Decode every XADD call's "data" field (JSON) into an event dict."""
     events = []
     for call in mock_xadd.call_args_list:
         args, kwargs = call
@@ -40,6 +44,8 @@ def _captured_events(mock_xadd) -> list[dict]:
 
 
 def _assert_contract_compliant(event: dict):
+    """Assert an event's keys are exactly CONTRACT_FIELDS (no more, no
+    less) and that event_id/timestamp are non-empty and well-formed."""
     assert set(event.keys()) == CONTRACT_FIELDS, event.keys()
     assert event["event_id"], "event_id must be non-empty"
     assert event["timestamp"], "timestamp must be non-empty"
@@ -54,6 +60,8 @@ def _assert_contract_compliant(event: dict):
 # ---------------------------------------------------------------------------
 
 def test_audit_middleware_request_event_is_contract_compliant(client, authed):
+    """AuditMiddleware's "request" event is contract-compliant and its
+    context carries endpoint/latency_ms/status_code."""
     with patch.object(_audit_client_mod._redis, "xadd", AsyncMock(return_value="0-0")) as mock_xadd:
         client.get("/workbench/ping", headers={"Authorization": "Bearer token"})
 
@@ -68,6 +76,8 @@ def test_audit_middleware_request_event_is_contract_compliant(client, authed):
 
 
 def test_hpc_middleware_denial_event_is_contract_compliant(client, valid_user):
+    """An HPC quota denial's "hpc_denied" event is contract-compliant
+    with decision="deny" and the denial's reason attached."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
@@ -88,6 +98,8 @@ def test_hpc_middleware_denial_event_is_contract_compliant(client, valid_user):
 
 
 def test_auth_middleware_missing_token_event_is_contract_compliant(client):
+    """A missing-token 401's "auth_failed" event is contract-compliant
+    with reason="missing_token"."""
     with patch.object(_audit_client_mod._redis, "xadd", AsyncMock(return_value="0-0")) as mock_xadd:
         client.get("/workbench/")
 
@@ -99,6 +111,8 @@ def test_auth_middleware_missing_token_event_is_contract_compliant(client):
 
 
 def test_auth_middleware_invalid_token_event_is_contract_compliant(client):
+    """An invalid-token 401's "auth_failed" event is contract-compliant
+    with reason="invalid_token"."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=None)),
         patch.object(_audit_client_mod._redis, "xadd", AsyncMock(return_value="0-0")) as mock_xadd,
@@ -112,6 +126,8 @@ def test_auth_middleware_invalid_token_event_is_contract_compliant(client):
 
 
 def test_policy_middleware_denial_event_is_contract_compliant(client, valid_user):
+    """A policy denial's "policy_denied" event is contract-compliant
+    with decision="deny" and the denial's reason attached."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -131,6 +147,8 @@ def test_policy_middleware_denial_event_is_contract_compliant(client, valid_user
 
 
 def test_gateway_upstream_forward_event_is_contract_compliant(client, authed):
+    """gateway.py's "upstream_forward" event is contract-compliant and
+    its context carries the upstream response's status_code."""
     with patch.object(_audit_client_mod._redis, "xadd", AsyncMock(return_value="0-0")) as mock_xadd:
         client.get("/workbench/ping", headers={"Authorization": "Bearer token"})
 

@@ -7,6 +7,9 @@ The middleware:
   - Returns 401 {"error": "invalid token"} when iam.validate returns None
   - Strips the "Bearer " prefix before calling iam.validate
   - Attaches the user dict to request.state.user on success
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 from unittest.mock import AsyncMock, patch
 
@@ -14,12 +17,14 @@ import app.main as _main_mod
 
 
 def test_missing_token_returns_401(client):
+    """No Authorization header -> 401 {"error": "missing token"}."""
     resp = client.get("/workbench/")
     assert resp.status_code == 401
     assert resp.json().get("error") == "missing token"
 
 
 def test_invalid_token_returns_401(client):
+    """iam.validate() returning None -> 401 {"error": "invalid token"}."""
     with patch.object(_main_mod.iam, "validate", AsyncMock(return_value=None)):
         resp = client.get(
             "/workbench/", headers={"Authorization": "Bearer invalid.token.here"}
@@ -29,6 +34,7 @@ def test_invalid_token_returns_401(client):
 
 
 def test_valid_token_passes_auth(client, valid_user):
+    """A validated token clears AuthMiddleware (response is not 401)."""
     # workbench is an HPC compute service, so hpc.evaluate must also be mocked.
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
@@ -75,10 +81,12 @@ def test_bearer_prefix_stripped(client, valid_user):
 
 
 def test_unauthenticated_non_health_path_returns_401(client):
+    """A non-skip-listed path with no token is still 401'd by AuthMiddleware."""
     resp = client.get("/auth/verify")
     assert resp.status_code == 401
 
 
 def test_health_skip_path_bypasses_auth(client):
+    """/health is on the skip-list, so it's reachable with no token at all."""
     resp = client.get("/health")
     assert resp.status_code == 200

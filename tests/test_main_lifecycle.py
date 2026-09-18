@@ -1,4 +1,11 @@
-"""Tests for app/main.py lifecycle and background task."""
+"""Covers app/main.py's background IAM-cache invalidation loop: that a
+non-empty token in an invalidation message evicts the right cache entry,
+an empty token is a no-op, and the loop resubscribes after the
+subscription itself raises instead of dying silently.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
 import asyncio
 from unittest.mock import AsyncMock, patch
 

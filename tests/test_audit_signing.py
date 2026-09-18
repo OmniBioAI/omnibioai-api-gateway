@@ -9,6 +9,9 @@ audit.signing.sign_audit_event() (not reproduced here, just its output),
 so a passing test_matches_real_consumer_signing_vector proves this port
 is byte-for-byte compatible with the actual consumer's verifier without
 this repo importing or depending on that one at runtime or at test time.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 import json
 from unittest.mock import AsyncMock
@@ -52,6 +55,7 @@ def test_matches_real_consumer_signing_vector():
 # ---------------------------------------------------------------------------
 
 def test_sign_audit_event_returns_v1_prefixed_hex():
+    """The signature is "v1:<hex mac>" -- a version prefix over valid hex."""
     sig = sign_audit_event("gateway", '{"a": 1}', "s3cr3t")
     version, sep, mac_hex = sig.partition(":")
     assert version == "v1"
@@ -60,11 +64,13 @@ def test_sign_audit_event_returns_v1_prefixed_hex():
 
 
 def test_sign_rejects_empty_service():
+    """An empty service string raises ValueError rather than signing."""
     with pytest.raises(ValueError):
         sign_audit_event("", '{"a": 1}', "s3cr3t")
 
 
 def test_sign_rejects_none_data():
+    """data=None raises ValueError rather than signing a null payload."""
     with pytest.raises(ValueError):
         sign_audit_event("gateway", None, "s3cr3t")
 
@@ -78,6 +84,8 @@ def test_sign_rejects_none_data():
 # ---------------------------------------------------------------------------
 
 def test_tampered_data_produces_a_different_signature():
+    """Changing decision "allow"->"deny" in the data string changes the
+    computed signature -- tampering is detectable."""
     original = '{"event_type": "request", "decision": "allow"}'
     tampered = '{"event_type": "request", "decision": "deny"}'
     sig_original = sign_audit_event("gateway", original, "s3cr3t")
@@ -86,12 +94,15 @@ def test_tampered_data_produces_a_different_signature():
 
 
 def test_even_one_byte_of_difference_changes_the_signature():
+    """A single-character change in the data string changes the signature."""
     sig_a = sign_audit_event("gateway", '{"x": 1}', "s3cr3t")
     sig_b = sign_audit_event("gateway", '{"x": 2}', "s3cr3t")
     assert sig_a != sig_b
 
 
 def test_relabeling_onto_a_different_service_changes_the_signature():
+    """The same data string signed under a different service name
+    produces a different signature -- the service is bound into the MAC."""
     data = '{"a": 1}'
     sig_gateway = sign_audit_event("gateway", data, "s3cr3t")
     sig_tes = sign_audit_event("tes", data, "s3cr3t")
@@ -99,6 +110,7 @@ def test_relabeling_onto_a_different_service_changes_the_signature():
 
 
 def test_signing_is_deterministic():
+    """The same (service, data, secret) always produces the same signature."""
     data = '{"a": 1}'
     assert sign_audit_event("gateway", data, "s3cr3t") == sign_audit_event(
         "gateway", data, "s3cr3t"
@@ -140,6 +152,8 @@ async def test_emit_signs_the_exact_data_string_it_publishes(monkeypatch):
 
 
 async def test_emit_includes_both_data_and_sig_fields(monkeypatch):
+    """_emit() publishes both a "data" field and a "v1:"-prefixed "sig"
+    field on the stream entry."""
     from app.services import audit_client as mod
 
     captured = {}
@@ -187,11 +201,14 @@ async def test_emit_without_a_service_still_publishes_unsigned(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_signature_does_not_contain_the_secret():
+    """The signing secret never appears verbatim inside the output signature."""
     sig = sign_audit_event("gateway", '{"a": 1}', "super-secret-value")
     assert "super-secret-value" not in sig
 
 
 def test_wrong_secret_produces_a_different_signature():
+    """Signing the same data with two different secrets yields two
+    different signatures -- the secret is bound into the MAC."""
     data = '{"a": 1}'
     assert sign_audit_event("gateway", data, "secret-a") != sign_audit_event(
         "gateway", data, "secret-b"
@@ -235,6 +252,9 @@ def test_missing_jwt_secret_does_not_silently_use_an_unsafe_literal(monkeypatch)
 # ---------------------------------------------------------------------------
 
 def test_signing_key_is_domain_separated_from_a_bare_secret_hash():
+    """_signing_key() is NOT the same as a plain sha256(secret) -- domain
+    separation via the fixed label prevents a key/message-confusion
+    attack against another HMAC construction sharing the same secret."""
     import hashlib
 
     secret = "s3cr3t"
@@ -242,5 +262,7 @@ def test_signing_key_is_domain_separated_from_a_bare_secret_hash():
 
 
 def test_signing_message_uses_newline_separator_not_concatenation():
+    """_signing_message() uses an unambiguous field separator: service="ab"
+    + data="cd" must not collide with service="a" + data="bcd"."""
     # service="ab", data="cd" must not collide with service="a", data="bcd"
     assert _signing_message("v1", "ab", "cd") != _signing_message("v1", "a", "bcd")

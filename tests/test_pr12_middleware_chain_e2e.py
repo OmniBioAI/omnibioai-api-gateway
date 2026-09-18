@@ -8,6 +8,9 @@ test_hpc_middleware.py). Uses a non-HPC-gated route (model-registry) for
 the plain-200 case so this exercises exactly Trace/Auth/Policy/Audit
 without also needing an HPC mock -- HPC gating on compute services is
 already covered end-to-end by test_hpc_middleware.py.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +22,8 @@ import app.main as _main_mod
 # ---------------------------------------------------------------------------
 
 def test_no_jwt_returns_401(client):
+    """A request with no Authorization header is rejected 401 before it
+    ever reaches policy evaluation or the proxy."""
     resp = client.get("/model-registry/v1")
 
     assert resp.status_code == 401
@@ -29,6 +34,8 @@ def test_no_jwt_returns_401(client):
 # ---------------------------------------------------------------------------
 
 def test_invalid_jwt_returns_401(client):
+    """A bearer token that IAM.validate() rejects (returns None) is
+    401'd through the full middleware chain, same as no token at all."""
     with patch.object(_main_mod.iam, "validate", AsyncMock(return_value=None)):
         resp = client.get(
             "/model-registry/v1",
@@ -43,6 +50,8 @@ def test_invalid_jwt_returns_401(client):
 # ---------------------------------------------------------------------------
 
 def test_valid_jwt_insufficient_permission_returns_403(client, valid_user):
+    """An authenticated user whom PolicyClient.evaluate() denies gets a
+    403 "forbidden" response instead of reaching the proxy."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -65,6 +74,8 @@ def test_valid_jwt_insufficient_permission_returns_403(client, valid_user):
 # ---------------------------------------------------------------------------
 
 def test_valid_jwt_with_permission_returns_200(client, valid_user):
+    """A fully authenticated, policy-allowed request reaches a 200
+    response through the complete Trace/Auth/Policy/Audit chain."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(

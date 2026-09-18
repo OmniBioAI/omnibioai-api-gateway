@@ -1,4 +1,13 @@
-"""Tests for app/services/hpc_policy_client.py — HPCPolicyClient unit tests."""
+"""HPCPolicyClient.evaluate() must build the correct /jobs/evaluate
+request (resource fields, gpu-vs-cpu partition selection, roles, service-
+to-service headers), retry once on a timeout before failing closed with
+an "hpc_timeout" reason, and fail closed with "hpc_error" on any other
+exception. is_compute_service() must correctly classify HPC_COMPUTE_SERVICES
+membership.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -9,6 +18,8 @@ from app.services.hpc_policy_client import HPCPolicyClient, HPC_COMPUTE_SERVICES
 
 @pytest.fixture
 def hpc_client():
+    """A real HPCPolicyClient built against a mocked httpx.AsyncClient;
+    returns (client, mock_http) so tests can assert on the mock's calls."""
     mock_http = AsyncMock()
     with patch("app.services.hpc_policy_client.httpx.AsyncClient", return_value=mock_http):
         client = HPCPolicyClient("http://hpc-service")
@@ -16,6 +27,7 @@ def hpc_client():
 
 
 def test_is_compute_service_known():
+    """is_compute_service() is True for every HPC_COMPUTE_SERVICES entry."""
     client = HPCPolicyClient.__new__(HPCPolicyClient)
     client.base_url = ""
     for svc in HPC_COMPUTE_SERVICES:
@@ -23,11 +35,13 @@ def test_is_compute_service_known():
 
 
 def test_is_compute_service_unknown():
+    """is_compute_service() is False for a service not in the HPC set."""
     client = HPCPolicyClient.__new__(HPCPolicyClient)
     assert client.is_compute_service("unknown-svc") is False
 
 
 async def test_evaluate_success_cpu(hpc_client):
+    """A successful POST returns the HPC engine's JSON response as-is."""
     client, mock_http = hpc_client
     resp = MagicMock()
     resp.json.return_value = {"allow": True}
@@ -37,6 +51,7 @@ async def test_evaluate_success_cpu(hpc_client):
 
 
 async def test_evaluate_gpu_sets_gpu_partition(hpc_client):
+    """Requesting gpus>0 sends partition="gpu" along with the gpu count."""
     client, mock_http = hpc_client
     resp = MagicMock()
     resp.json.return_value = {"allow": True}
@@ -48,6 +63,7 @@ async def test_evaluate_gpu_sets_gpu_partition(hpc_client):
 
 
 async def test_evaluate_no_gpu_sets_cpu_partition(hpc_client):
+    """gpus=0 (the default) sends partition="cpu"."""
     client, mock_http = hpc_client
     resp = MagicMock()
     resp.json.return_value = {"allow": True}
@@ -58,6 +74,8 @@ async def test_evaluate_no_gpu_sets_cpu_partition(hpc_client):
 
 
 async def test_evaluate_sends_correct_headers(hpc_client):
+    """The POST carries X-Internal-Service, the caller's trace id, and
+    the requesting user's id as request headers."""
     client, mock_http = hpc_client
     resp = MagicMock()
     resp.json.return_value = {"allow": True}
@@ -70,6 +88,8 @@ async def test_evaluate_sends_correct_headers(hpc_client):
 
 
 async def test_evaluate_timeout_first_attempt_retries(hpc_client):
+    """A timeout on the first POST attempt is retried once and, on
+    success, returns the second attempt's result."""
     client, mock_http = hpc_client
     resp = MagicMock()
     resp.json.return_value = {"allow": True}
@@ -80,6 +100,8 @@ async def test_evaluate_timeout_first_attempt_retries(hpc_client):
 
 
 async def test_evaluate_timeout_both_attempts_returns_hpc_timeout(hpc_client):
+    """A timeout on both attempts fails closed: {"allow": False,
+    "reason": "hpc_timeout"}, not an unhandled exception."""
     client, mock_http = hpc_client
     mock_http.post.side_effect = httpx.TimeoutException("t/o")
     result = await client.evaluate("u1", "tes")
@@ -87,6 +109,8 @@ async def test_evaluate_timeout_both_attempts_returns_hpc_timeout(hpc_client):
 
 
 async def test_evaluate_generic_exception_returns_hpc_error(hpc_client):
+    """Any non-timeout exception from the POST fails closed with
+    {"allow": False, "reason": "hpc_error"}."""
     client, mock_http = hpc_client
     mock_http.post.side_effect = RuntimeError("conn error")
     result = await client.evaluate("u1", "tes")
@@ -94,6 +118,8 @@ async def test_evaluate_generic_exception_returns_hpc_error(hpc_client):
 
 
 async def test_evaluate_all_resource_fields(hpc_client):
+    """cpu_hours/gpu_hours/gpus/memory_gb all reach the request payload,
+    and a denial response (with its reason) is returned unchanged."""
     client, mock_http = hpc_client
     resp = MagicMock()
     resp.json.return_value = {"allow": False, "reason": "quota"}
@@ -123,6 +149,7 @@ async def test_evaluate_forwards_roles(hpc_client):
 
 
 async def test_evaluate_defaults_to_no_roles(hpc_client):
+    """Calling evaluate() with no roles argument sends roles: []."""
     client, mock_http = hpc_client
     resp = MagicMock()
     resp.json.return_value = {"allow": True}

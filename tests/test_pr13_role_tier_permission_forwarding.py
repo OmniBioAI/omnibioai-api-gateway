@@ -8,6 +8,9 @@ only what this repo is responsible for: the right input reaches Policy
 Engine's /policy/evaluate call, matching this file's existing convention
 (test_pr12_org_context_propagation.py) of mocking PolicyClient.evaluate
 rather than re-verifying its internals.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 from unittest.mock import AsyncMock, patch
 
@@ -34,6 +37,7 @@ ROLE_TIERS = {
 
 
 def _user_for_tier(tier: str) -> dict:
+    """Build an IAM-validate-shaped user payload for one ROLE_TIERS entry."""
     return {
         "user_id": "u-tier-test",
         "email": "tier-test@omnibioai.test",
@@ -45,6 +49,9 @@ def _user_for_tier(tier: str) -> dict:
 @pytest.mark.parametrize("tier", sorted(ROLE_TIERS.keys()))
 @pytest.mark.parametrize("service", sorted(SERVICE_MAP.keys()))
 def test_policy_evaluate_receives_tier_permissions_and_required_permission(client, tier, service):
+    """PolicyClient.evaluate() must receive the caller's own tier-specific
+    permission set, plus the correct required_permission and service name
+    for whichever SERVICE_MAP entry the request targets."""
     user = _user_for_tier(tier)
     mock_evaluate = AsyncMock(return_value={"allowed": True})
     with (
