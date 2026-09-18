@@ -2,6 +2,9 @@
 
 These checks intentionally inspect structure only.  They never read a build
 credential and therefore remain safe to run in ordinary unit-test jobs.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 
 from pathlib import Path
@@ -24,6 +27,9 @@ def _executable_lines(text: str) -> str:
 
 
 def test_no_credential_bearing_git_url_construction() -> None:
+    """Reject a Dockerfile pattern that would embed the GitHub token
+    directly in a `git config --global url.<...>` rewrite or an inline
+    `https://...@github.com` credential-bearing clone URL."""
     text = _executable_lines(_dockerfile())
     assert "git config --global url." not in text
     assert not re.search(
@@ -34,6 +40,9 @@ def test_no_credential_bearing_git_url_construction() -> None:
 
 
 def test_secret_is_used_only_via_ephemeral_askpass() -> None:
+    """The GitHub token must reach `git` only through BuildKit's ephemeral
+    `--mount=type=secret` + a GIT_ASKPASS script that is deleted (via an
+    EXIT trap) immediately after use, never a persisted credential."""
     text = _dockerfile()
     assert "--mount=type=secret,id=github_token" in text
     assert "GIT_ASKPASS=/tmp/git-askpass" in text
@@ -43,6 +52,8 @@ def test_secret_is_used_only_via_ephemeral_askpass() -> None:
 
 
 def test_build_credential_is_not_persisted_as_arg_or_env() -> None:
+    """No ARG/ENV line may reference `github_token` or the secret mount
+    path — either would bake the credential into the built image layers."""
     text = _dockerfile()
     for line in text.splitlines():
         stripped = line.strip()

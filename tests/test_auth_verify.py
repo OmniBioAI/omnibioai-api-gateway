@@ -2,6 +2,9 @@
 nginx-router.conf's `auth_request /internal/auth/verify`, replacing the
 accidental incidental-200-via-unmapped-service-catch-all behavior PR7
 found. See app/routes/auth_verify.py for the full contract rationale.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +12,7 @@ import app.main as _main_mod
 
 
 def test_valid_token_returns_200(client, valid_user):
+    """A validated bearer token gets a 200 from /auth/verify."""
     with patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)):
         resp = client.get("/auth/verify", headers={"Authorization": "Bearer token"})
 
@@ -16,6 +20,8 @@ def test_valid_token_returns_200(client, valid_user):
 
 
 def test_valid_token_response_contract(client, valid_user):
+    """The response body is exactly {authenticated: True, user: {id, roles}}
+    -- the nginx auth_request contract this route exists to serve."""
     with patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)):
         resp = client.get("/auth/verify", headers={"Authorization": "Bearer token"})
 
@@ -30,11 +36,13 @@ def test_valid_token_response_contract(client, valid_user):
 
 
 def test_missing_token_returns_401(client):
+    """No Authorization header -> 401 from /auth/verify."""
     resp = client.get("/auth/verify")
     assert resp.status_code == 401
 
 
 def test_invalid_token_returns_401(client):
+    """iam.validate() returning None -> 401 from /auth/verify."""
     with patch.object(_main_mod.iam, "validate", AsyncMock(return_value=None)):
         resp = client.get("/auth/verify", headers={"Authorization": "Bearer bad-token"})
     assert resp.status_code == 401

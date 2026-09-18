@@ -3,6 +3,9 @@ Tests for PolicyMiddleware (app/middleware/policy.py).
 
 PolicyClient.evaluate() returns {"allowed": bool, "reason": str}.
 The middleware returns 403 {"error": "forbidden", "reason": ...} on denial.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 import json
 import pytest
@@ -12,6 +15,8 @@ import app.main as _main_mod
 
 
 def test_policy_denial_returns_403(client, valid_user):
+    """PolicyClient.evaluate() returning allowed=False -> 403 "forbidden"
+    with its reason string forwarded in the response body."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -30,6 +35,7 @@ def test_policy_denial_returns_403(client, valid_user):
 
 
 def test_policy_approval_passes_through(client, valid_user):
+    """PolicyClient.evaluate() returning allowed=True does not 403."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -73,6 +79,8 @@ def test_policy_denial_without_reason(client, valid_user):
 # ---------------------------------------------------------------------------
 
 def test_evaluate_called_with_derived_permission_for_mapped_service(client, valid_user):
+    """PolicyClient.evaluate() receives required_permission="workflow.execute"
+    and service="workbench", derived from SERVICE_MAP for this route."""
     mock_evaluate = AsyncMock(return_value={"allowed": True})
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
@@ -87,6 +95,8 @@ def test_evaluate_called_with_derived_permission_for_mapped_service(client, vali
 
 
 def test_evaluate_called_with_model_use_for_model_registry(client, valid_user):
+    """PolicyClient.evaluate() derives required_permission="model.use" for
+    the model-registry service specifically."""
     mock_evaluate = AsyncMock(return_value={"allowed": True})
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
@@ -100,6 +110,9 @@ def test_evaluate_called_with_model_use_for_model_registry(client, valid_user):
 
 
 def test_evaluate_called_with_none_for_unmapped_service(client, valid_user):
+    """A service absent from SERVICE_MAP yields required_permission=None
+    -- the policy engine still gets the call, just with no permission
+    requirement attached, rather than the request being blocked here."""
     mock_evaluate = AsyncMock(return_value={"allowed": True})
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),

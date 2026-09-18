@@ -1,3 +1,11 @@
+"""Shared pytest fixtures: a synchronous ASGI test client, and autouse
+isolation so no test can reach real Redis or a real upstream service --
+see _isolate_external_io's own docstring for why this fixture exists.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import asyncio
 import pytest
 import httpx
@@ -33,6 +41,8 @@ class SyncASGIClient:
 
 @pytest.fixture(scope="session")
 def client():
+    """A synchronous test client wrapping the real FastAPI app over an
+    in-process ASGI transport (no real network socket)."""
     # Stub subscribe_invalidation so the background invalidation task never
     # hits Redis during the test session.
     with patch.object(
@@ -73,6 +83,9 @@ def _isolate_external_io():
 
 @pytest.fixture
 def valid_user():
+    """A minimal, already-authenticated identity dict shaped like
+    IAMClient.validate()'s return value, for tests that need a caller
+    identity without exercising IAM validation itself."""
     return {
         "user_id": "123",
         "email": "test@omnibioai.com",

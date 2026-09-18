@@ -6,6 +6,9 @@ app/middleware/policy.py's own docstring for why: PolicyMiddleware's
 remote policy-engine call is the authorization decision there, not a
 second local one) -- these are direct unit tests of the dependency
 itself, for use by any route this gateway defines natively.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
 """
 from unittest.mock import MagicMock
 
@@ -17,6 +20,7 @@ from app.core.router import resolve_required_permission
 
 
 def _request_with_identity(identity):
+    """Build a mock Request whose state.identity is the given value."""
     request = MagicMock()
     request.state = MagicMock()
     request.state.identity = identity
@@ -24,6 +28,7 @@ def _request_with_identity(identity):
 
 
 def test_correct_permission_returns_identity():
+    """An identity holding the required permission is returned unchanged."""
     check = require_permission("workflow.execute")
     request = _request_with_identity({"user_id": "1", "permissions": ["workflow.execute"]})
     result = check(request)
@@ -31,6 +36,7 @@ def test_correct_permission_returns_identity():
 
 
 def test_missing_permission_raises_403():
+    """An identity with an empty permissions list is denied 403."""
     check = require_permission("workflow.execute")
     request = _request_with_identity({"user_id": "1", "permissions": []})
     with pytest.raises(HTTPException) as ctx:
@@ -49,6 +55,7 @@ def test_unknown_permission_raises_403_never_fails_open():
 
 
 def test_missing_permissions_claim_raises_403():
+    """An identity with no permissions claim at all is denied 403."""
     check = require_permission("workflow.execute")
     request = _request_with_identity({"user_id": "1"})
     with pytest.raises(HTTPException) as ctx:
@@ -57,6 +64,7 @@ def test_missing_permissions_claim_raises_403():
 
 
 def test_no_identity_raises_401():
+    """No identity on the request (state.identity is None) is 401, not 403."""
     check = require_permission("workflow.execute")
     request = _request_with_identity(None)
     with pytest.raises(HTTPException) as ctx:
@@ -76,4 +84,6 @@ def test_no_identity_raises_401():
     ],
 )
 def test_resolve_required_permission(service, expected_permission):
+    """resolve_required_permission() maps each SERVICE_MAP service to its
+    IAM permission, and returns None for a service with no mapping."""
     assert resolve_required_permission(service) == expected_permission
