@@ -2,9 +2,11 @@
 
 **Zero-trust API gateway for the OmniBioAI platform.**
 
-Single enforced entry point for all service traffic. Every request
-is authenticated, authorized, quota-checked, and audited before
-reaching any backend service.
+Gateway for the configured OmniBioAI backend services. Proxied requests pass
+through the gateway middleware chain for authentication, policy evaluation,
+compute quota checks where applicable, and audit emission before forwarding.
+The gateway is not the implementation of the backend services and its route
+map is limited to the services configured in `app/core/router.py`.
 
 ---
 
@@ -289,9 +291,10 @@ Set in `omnibioai-studio/.env`:
 cd ~/Desktop/machine/omnibioai-api-gateway
 pytest tests/ -v --cov=app
 
-# 179 tests passing
-# 99% coverage
-# Covers: auth middleware, policy middleware, HPC middleware,
+# The command above is the supported validation entrypoint. Test counts and
+# coverage figures from earlier dated runs are historical snapshots and are
+# not asserted as current status here.
+# It covers auth middleware, policy middleware, HPC middleware,
 #         trace middleware, audit middleware, config, gateway router,
 #         permissions dependency, and the PR12/PR13 middleware-chain
 #         end-to-end + org-context/role-tier forwarding suites
