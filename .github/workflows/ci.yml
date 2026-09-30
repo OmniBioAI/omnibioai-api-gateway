@@ -5,6 +5,11 @@ on:
     branches: [main]
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag to publish without a leading v
+        required: true
+        default: 0.1.1
 
 jobs:
   docker:
@@ -38,7 +43,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=sha,prefix=sha-,format=short
 
       # QEMU registers binfmt_misc handlers so the amd64 GitHub-hosted
@@ -81,7 +86,21 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
           secrets: |
             github_token=${{ secrets.IAM_CLIENT_READ_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify published manifest
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-${REF_NAME#v}}"
+          image="ghcr.io/${GITHUB_REPOSITORY}:${version}"
+          docker buildx imagetools inspect "$image" \
+            --format '{{range .Manifest.Manifests}}{{if eq .Platform.OS "linux"}}{{if or (eq .Platform.Architecture "amd64") (eq .Platform.Architecture "arm64")}}{{.Platform.Architecture}}{{"\n"}}{{end}}{{end}}{{end}}' \
+            | sort -u | diff -u <(printf '%s\n' amd64 arm64) -

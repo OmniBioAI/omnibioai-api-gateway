@@ -3,3 +3,6 @@ uvicorn
 httpx
 redis[asyncio]
 pyjwt
+# Keep the IAM client's transitive cryptography dependency on the validated
+# ARM64-compatible range; newer wheels use unsupported instructions here.
+cryptography==43.0.3

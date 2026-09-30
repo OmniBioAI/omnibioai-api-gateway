@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1
-FROM python:3.11-slim
+FROM python:3.11-slim AS runtime
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential curl git \
+ && apt-get install -y --no-install-recommends curl git \
  && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 10001 omnibioai \
+ && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/omnibioai omnibioai
 
 WORKDIR /app
 
@@ -53,6 +56,13 @@ RUN --mount=type=secret,id=github_token \
     GIT_ASKPASS=/tmp/git-askpass GIT_TERMINAL_PROMPT=0 \
       pip install --no-cache-dir --upgrade-strategy only-if-needed .
 
+RUN chown -R omnibioai:omnibioai /app /home/omnibioai
+USER omnibioai
+ENV HOME=/home/omnibioai TMPDIR=/tmp
+
 EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
