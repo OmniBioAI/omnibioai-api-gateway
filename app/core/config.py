@@ -47,3 +47,16 @@ class Config:
     # omnibioai-billing.
     USAGE_REDIS_URL = os.getenv("USAGE_REDIS_URL", REDIS_URL)
     USAGE_STREAM = os.getenv("USAGE_STREAM", "usage:events")
+    # A billable usage event is on the hot path of a successful, already-
+    # answered request -- V1Store.emit_usage must never raise back into
+    # the route. Historically it just swallowed an XADD failure and
+    # returned False, discarded by the caller: a real Redis outage at
+    # exactly the wrong moment meant a successful answer was returned
+    # (and the caller charged nothing) while its usage event was lost
+    # forever. app/services/outbox.py gives that failure a second chance:
+    # a local SQLite file, drained back into Redis on a later request
+    # once it recovers. A lost event must never become an overcharge, so
+    # this only ever adds a delayed write, never a duplicate billing path
+    # (drain uses the event's own deterministic event_id, same dedup
+    # omnibioai-billing's consumer already enforces).
+    USAGE_OUTBOX_PATH = os.getenv("USAGE_OUTBOX_PATH", "/tmp/gateway_usage_outbox.db")

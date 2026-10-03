@@ -14,6 +14,7 @@ from typing import Optional
 import redis.asyncio as aioredis
 
 from app.core.config import Config
+from app.services.outbox import Outbox
 
 _PREFIX = "gateway:v1:"
 # How long an in-progress idempotency claim blocks a duplicate. Longer than
@@ -100,9 +101,10 @@ class MemoryStore:
 
 
 class V1Store:
-    def __init__(self, redis_url: str, usage_redis_url: str):
+    def __init__(self, redis_url: str, usage_redis_url: str, outbox_path: str = Config.USAGE_OUTBOX_PATH):
         self.redis = aioredis.from_url(redis_url, decode_responses=True) if redis_url else MemoryStore()
         self.usage_redis = aioredis.from_url(usage_redis_url, decode_responses=True)
+        self.outbox = Outbox(outbox_path)
 
     # ---------------- rate limit (fixed one-minute window) ----------------
     async def hit_rate_limit(self, subject: str, limit: int) -> tuple[bool, int, int]:
@@ -190,11 +192,28 @@ class V1Store:
             pass
 
     # ---------------- billable usage -------------------------------------
+    async def _xadd_usage_event(self, event: dict) -> bool:
+        try:
+            await self.usage_redis.xadd(
+                Config.USAGE_STREAM, {"data": json.dumps(event)}, maxlen=1_000_000, approximate=True,
+            )
+            return True
+        except Exception:
+            return False
+
     async def emit_usage(self, *, org_id: str, user_id: str, resource: str, trace_id: str,
                          dedup_key: str, metadata: dict) -> bool:
         """XADD one billable usage event in omnibioai-usage-client's wire
         format. event_id is derived from dedup_key, so a replayed or
-        re-emitted request maps to the same id and billing counts it once."""
+        re-emitted request maps to the same id and billing counts it once.
+
+        A successful answer has already been returned to the caller by
+        the time this runs -- a lost event here is lost revenue, never
+        an overcharge, so an XADD failure writes to the local outbox
+        instead of discarding the event. Opportunistically drains any
+        already-pending outbox events first: once Redis recovers, the
+        very next successful call flushes the backlog rather than
+        waiting on a separate scheduler."""
         event = {
             "event_id": str(uuid.UUID(_sha(dedup_key)[:32])),
             "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
@@ -208,10 +227,8 @@ class V1Store:
             "trace_id": trace_id or None,
             "metadata": {**metadata, "billable": True},
         }
-        try:
-            await self.usage_redis.xadd(
-                Config.USAGE_STREAM, {"data": json.dumps(event)}, maxlen=1_000_000, approximate=True,
-            )
+        await self.outbox.drain(self._xadd_usage_event)
+        if await self._xadd_usage_event(event):
             return True
-        except Exception:
-            return False
+        self.outbox.write(event)
+        return False

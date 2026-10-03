@@ -12,10 +12,14 @@ policy, audit) every /v1 call gets:
 - exactly one billable usage event per successful billable call,
 - one error shape: {"error": {"type", "message", "request_id"}}.
 
-Request and response bodies of /v1/literature/answers are omnibioai-rag's
-own POST /v1/query contract, passed through unchanged.
+Request and response bodies of /v1/literature/answers are the frozen
+public contract (app/services/literature_contract.py), translated
+to/from omnibioai-rag's own POST /v1/query shape -- never passed
+through unchanged, so RAG's internal response shape is free to change
+independent of what external developers integrate against.
 """
 import re
+import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -23,6 +27,7 @@ from fastapi.responses import JSONResponse
 from app.core.config import Config
 from app.core.router import resolve_service
 from app.routes.gateway import build_upstream_headers, proxy
+from app.services.literature_contract import UnsupportedRequestError, build_public_answer, build_rag_query
 from app.services.v1_store import V1Store, request_fingerprint
 
 router = APIRouter(prefix="/v1")
@@ -93,11 +98,19 @@ async def literature_answers(request: Request):
     except Exception:
         return _error(400, "invalid_request", "Request body must be JSON.", request_id)
 
+    try:
+        rag_body = build_rag_query(body)
+    except UnsupportedRequestError as exc:
+        return _error(400, "unsupported_request", exc.message, request_id, detail={"field": exc.field})
+
     headers, limited = await _rate_limited(request, subject, request_id)
     if limited:
         return limited
 
     idempotency_key = request.headers.get("Idempotency-Key")
+    # Fingerprinted on the public request body the caller actually sent
+    # -- not the translated RAG body -- so "same Idempotency-Key, same
+    # request" is judged by the contract the caller integrates against.
     fingerprint = request_fingerprint(body)
     if idempotency_key is not None:
         if not _IDEMPOTENCY_KEY.match(idempotency_key):
@@ -122,12 +135,20 @@ async def literature_answers(request: Request):
                       "Your organization has used its included answers. Add a payment method or upgrade the plan.",
                       request_id, headers)
 
-    status, response = await _forward(request, "POST", "v1/query", body)
+    started = time.monotonic()
+    status, response = await _forward(request, "POST", "v1/query", rag_body)
+    latency_ms = round((time.monotonic() - started) * 1000)
 
-    if idempotency_key is not None:
-        await store.idempotency_finish(subject, idempotency_key, fingerprint, status, response)
     if not 200 <= status < 300:
+        if idempotency_key is not None:
+            await store.idempotency_finish(subject, idempotency_key, fingerprint, status, response)
         return _upstream_error(status, response, request_id, headers)
+
+    public_response = build_public_answer(
+        response, domain=body.get("domain"), request_id=request_id, latency_ms=latency_ms,
+    )
+    if idempotency_key is not None:
+        await store.idempotency_finish(subject, idempotency_key, fingerprint, status, public_response)
 
     identity = getattr(request.state, "identity", None) or {}
     await store.emit_usage(
@@ -144,7 +165,7 @@ async def literature_answers(request: Request):
         },
     )
     await store.consume_quota(org_id, ANSWER_RESOURCE)
-    return JSONResponse(response, status_code=status, headers={**headers, "X-Request-Id": request_id})
+    return JSONResponse(public_response, status_code=status, headers={**headers, "X-Request-Id": request_id})
 
 
 @router.get("/literature/studies")
