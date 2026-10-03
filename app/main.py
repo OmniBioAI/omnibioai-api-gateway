@@ -16,6 +16,7 @@ from app.services.hpc_policy_client import HPCPolicyClient
 
 from app.routes.auth_verify import router as auth_verify_router
 from app.routes.gateway import router
+from app.routes.v1 import router as v1_router
 
 iam = IAMClient(Config.IAM_URL, Config.REDIS_URL)
 policy = PolicyClient(Config.POLICY_URL)
@@ -74,6 +75,9 @@ app.add_middleware(TraceMiddleware)
 # otherwise be shadowed by gateway's own /{service}/{path:path} pattern
 # (service="auth", path="verify").
 app.include_router(auth_verify_router)
+# /v1 before the catch-all too, or /{service}/{path} would take "v1" as a
+# service name.
+app.include_router(v1_router)
 app.include_router(router)
 
 

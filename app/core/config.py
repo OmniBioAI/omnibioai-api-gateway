@@ -32,3 +32,15 @@ class Config:
     # Upper bound on how long one exchange is reused; the minted token's
     # own expiry (minus a safety margin) caps it further.
     API_KEY_CACHE_TTL = int(os.getenv("API_KEY_CACHE_TTL", "60"))
+
+    # Public /v1 API (app/routes/v1.py). Rate-limit, idempotency and quota
+    # keys live under gateway:v1:* on their own Redis ACL user, separate
+    # from the IAM cache user above.
+    V1_REDIS_URL = os.getenv("V1_REDIS_URL", REDIS_URL)
+    V1_RATE_LIMIT_PER_MINUTE = int(os.getenv("V1_RATE_LIMIT_PER_MINUTE", "60"))
+    V1_IDEMPOTENCY_TTL = int(os.getenv("V1_IDEMPOTENCY_TTL", "86400"))
+    # Billable usage goes to the same usage:events stream every other
+    # producer writes (omnibioai-usage-client wire format), consumed by
+    # omnibioai-billing.
+    USAGE_REDIS_URL = os.getenv("USAGE_REDIS_URL", REDIS_URL)
+    USAGE_STREAM = os.getenv("USAGE_STREAM", "usage:events")

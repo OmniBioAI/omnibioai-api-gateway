@@ -41,31 +41,17 @@ _RESERVED_UPSTREAM_HEADERS = frozenset({
 })
 
 
-@router.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def gateway(service: str, path: str, request: Request):
-    target = resolve_service(service)
-
-    if not target:
-        return {"error": "unknown service"}
-
-    # Preserve encoded query parameters for upstream contracts such as TES's
-    # `server_id` selector.  The generic proxy must not silently change the
-    # semantics of a routed request by dropping its query string.
-    url = f"{target}/{path}"
-    if request.url.query:
-        url = f"{url}?{request.url.query}"
-
+def build_upstream_headers(request: Request) -> dict:
+    """Headers for a request forwarded to a downstream service: the
+    client's own headers minus every identity header the gateway sets
+    itself, plus the gateway's verified identity and the validated bearer
+    token (for an API key, the short-lived JWT minted for it). Shared by
+    the catch-all route below and the public /v1 API (app/routes/v1.py)."""
     user = getattr(request.state, "user", None)
     trace_id = getattr(request.state, "trace_id", "")
     user_id = user.get("user_id", "") if user else ""
     token = getattr(request.state, "token", None)
     identity = getattr(request.state, "identity", None)
-
-    body = None
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
 
     # See _RESERVED_UPSTREAM_HEADERS above for why every gateway-set
     # identity header must be excluded here, not just authorization.
@@ -101,6 +87,36 @@ async def gateway(service: str, path: str, request: Request):
         # X-Internal-Service are unchanged and still sent, for backward
         # compatibility with anything already reading them.
         upstream_headers["Authorization"] = f"Bearer {token}"
+
+    return upstream_headers
+
+
+@router.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def gateway(service: str, path: str, request: Request):
+    target = resolve_service(service)
+
+    if not target:
+        return {"error": "unknown service"}
+
+    # Preserve encoded query parameters for upstream contracts such as TES's
+    # `server_id` selector.  The generic proxy must not silently change the
+    # semantics of a routed request by dropping its query string.
+    url = f"{target}/{path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+
+    user = getattr(request.state, "user", None)
+    trace_id = getattr(request.state, "trace_id", "")
+    user_id = user.get("user_id", "") if user else ""
+    identity = getattr(request.state, "identity", None)
+
+    body = None
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+
+    upstream_headers = build_upstream_headers(request)
 
     status, response = await proxy.forward(
         url=url,
