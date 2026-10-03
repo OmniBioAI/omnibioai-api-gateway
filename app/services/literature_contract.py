@@ -61,6 +61,62 @@ def build_rag_query(body: dict) -> dict:
     return query
 
 
+def build_rag_search_query(body: dict) -> dict:
+    """Translate a public /v1/literature/search request body into RAG's
+    POST /v1/query body (with mode="search" set by the caller, not here --
+    that's the one field this function doesn't own, since it's not part of
+    the public contract). Raises UnsupportedRequestError for a missing/
+    blank question, the only field this endpoint requires.
+
+    Unlike build_rag_query above, model/use_own_key/stream are not
+    validated here at all: search is retrieval-only regardless of what a
+    caller sends for them, so there is no "unsupported" case for fields
+    that were never going to change this call's behavior.
+    """
+    if not isinstance(body, dict):
+        raise UnsupportedRequestError("body", "Request body must be a JSON object.")
+
+    question = body.get("question")
+    if not isinstance(question, str) or not question.strip():
+        raise UnsupportedRequestError("question", "\"question\" is required and must be a non-empty string.")
+
+    query: dict = {"query": question, "study": body.get("domain") or "default", "mode": "search"}
+    max_results = body.get("max_results")
+    if isinstance(max_results, (int, float)) and not isinstance(max_results, bool) and max_results > 0:
+        query["top_k"] = int(max_results)
+    return query
+
+
+def build_public_search(rag_result: dict, *, domain, request_id: str, latency_ms: int) -> dict:
+    """Translate RAG's /v1/query (mode="search") response into the frozen
+    public /v1/literature/search response shape: ranked documents, no
+    generated answer."""
+    documents = rag_result.get("documents") or []
+    results = [
+        {
+            "pmid": doc.get("pmid"),
+            "title": doc.get("title"),
+            "year": doc.get("year"),
+            "score": doc.get("citation_confidence", doc.get("similarity_score")),
+            # The design doc calls this a "snippet"; RAG only has the full
+            # abstract text to offer, not a separately-generated excerpt,
+            # so that's what's returned under this name rather than
+            # fabricating a truncation.
+            "snippet": doc.get("abstract"),
+        }
+        for doc in documents
+    ]
+    return {
+        "id": f"srch_{request_id or uuid.uuid4().hex}",
+        "results": results,
+        "domain": rag_result.get("study", domain),
+        "usage": {
+            "searches": 1,
+            "latency_ms": latency_ms,
+        },
+    }
+
+
 def build_public_answer(rag_result: dict, *, domain, request_id: str, latency_ms: int) -> dict:
     """Translate RAG's /v1/query response into the frozen public
     /v1/literature/answers response shape."""

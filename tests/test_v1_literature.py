@@ -310,6 +310,118 @@ def test_studies_is_free_and_rate_limited(client, redis, upstream, monkeypatch):
     assert client.get("/v1/literature/studies", headers={"Authorization": f"Bearer {KEY}"}).status_code == 429
 
 
+def test_domains_is_free_and_rate_limited(client, redis, upstream, monkeypatch):
+    upstream.return_value = (200, {"studies": [{"name": "oncology", "abstract_count": 12}]})
+    resp = client.get("/v1/literature/domains", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 200
+    assert resp.json() == {"domains": [{"name": "oncology", "abstract_count": 12}]}
+    assert upstream.call_args.kwargs["url"] == "http://rag:8096/v1/studies"
+    assert _usage(redis) == []
+
+    upstream.return_value = (500, {})
+    assert client.get("/v1/literature/domains", headers={"Authorization": f"Bearer {KEY}"}).status_code == 502
+
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 0)
+    assert client.get("/v1/literature/domains", headers={"Authorization": f"Bearer {KEY}"}).status_code == 429
+
+
+def test_search_forwards_search_mode_and_bills_search_resource(client, redis, upstream):
+    """/v1/literature/search uses the same billable-call lifecycle as
+    /v1/literature/answers, but bills "literature.search" (not
+    "literature.answer") and tells RAG mode="search" so no LLM is
+    invoked -- the response has no generated answer."""
+    upstream.return_value = (200, {
+        "study": "default", "mode": "search", "summary": None,
+        "documents": [{"pmid": "1", "title": "TP53 review", "year": 2021, "citation_confidence": 0.9,
+                        "abstract": "TP53 is a tumor suppressor."}],
+    })
+    resp = client.post("/v1/literature/search", json={"question": "What does TP53 do?"},
+                        headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"].startswith("srch_")
+    assert body["results"] == [{"pmid": "1", "title": "TP53 review", "year": 2021, "score": 0.9,
+                                 "snippet": "TP53 is a tumor suppressor."}]
+    assert body["domain"] == "default"
+    assert body["usage"]["searches"] == 1
+    assert "answer" not in body
+
+    kwargs = upstream.call_args.kwargs
+    assert kwargs["method"] == "POST"
+    assert kwargs["body"] == {"query": "What does TP53 do?", "study": "default", "mode": "search"}
+
+    (event,) = _usage(redis)
+    assert event["resource"] == "literature.search"
+
+
+def test_search_rejects_missing_question(client, redis, upstream):
+    resp = client.post("/v1/literature/search", json={}, headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["detail"]["field"] == "question"
+    upstream.assert_not_called()
+
+
+def test_search_quota_exceeded(client, redis, upstream):
+    with patch.object(v1.store, "quota_remaining", AsyncMock(return_value=0)):
+        resp = client.post("/v1/literature/search", json={"question": "q"},
+                            headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 402
+    assert resp.json()["error"]["type"] == "quota_exceeded"
+    upstream.assert_not_called()
+
+
+def test_usage_requires_an_organization(client, redis, upstream):
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value={**USER, "org_id": None})):
+        resp = client.get("/v1/usage", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 403
+    assert resp.json()["error"]["type"] == "organization_required"
+    upstream.assert_not_called()
+
+
+def test_usage_translates_billing_response_and_is_free(client, redis, upstream):
+    upstream.return_value = (200, {
+        "organization_id": 42, "billing_plan_id": 1, "plan_name": "Free", "as_of": "2026-10-03",
+        "limits": [
+            {"service": "api", "action": "answer", "resource": "literature.answer", "unit": "requests",
+             "period": "monthly", "included": 100, "used": 12, "remaining": 88, "percentage_used": 12.0},
+        ],
+    })
+    resp = client.get("/v1/usage", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["plan"] == "Free"
+    assert body["as_of"] == "2026-10-03"
+    assert body["usage"] == [
+        {"resource": "literature.answer", "unit": "requests", "period": "monthly",
+         "included": 100, "used": 12, "remaining": 88},
+    ]
+    assert upstream.call_args.kwargs["url"] == "http://billing-service:8005/billing/organizations/42/subscription/usage-limits"
+    assert _usage(redis) == []
+
+
+def test_usage_no_active_plan_returns_404(client, redis, upstream):
+    upstream.return_value = (404, {"detail": "No active subscription"})
+    resp = client.get("/v1/usage", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["type"] == "no_active_plan"
+
+
+def test_usage_upstream_5xx_is_502(client, redis, upstream):
+    upstream.return_value = (500, {})
+    resp = client.get("/v1/usage", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 502
+    assert resp.json()["error"]["type"] == "upstream_error"
+
+
+def test_models_is_free_static_and_never_calls_upstream(client, redis, upstream):
+    resp = client.get("/v1/models", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 200
+    assert resp.json() == {"models": [{"model": "default", "source": "omnibioai_gpu",
+                                        "billed_by": "query", "price": None}]}
+    upstream.assert_not_called()
+    assert _usage(redis) == []
+
+
 def test_unauthenticated_v1_is_rejected(client):
     assert client.post("/v1/literature/answers", json=BODY).status_code == 401
 
