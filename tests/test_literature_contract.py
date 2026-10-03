@@ -4,7 +4,13 @@ internal POST /v1/query shape.
 """
 import pytest
 
-from app.services.literature_contract import UnsupportedRequestError, build_public_answer, build_rag_query
+from app.services.literature_contract import (
+    UnsupportedRequestError,
+    build_public_answer,
+    build_public_search,
+    build_rag_query,
+    build_rag_search_query,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -122,3 +128,92 @@ def test_domain_falls_back_to_caller_supplied_value_when_rag_result_has_no_study
 def test_missing_request_id_still_produces_an_id():
     answer = build_public_answer({}, domain=None, request_id="", latency_ms=1)
     assert answer["id"].startswith("ans_") and len(answer["id"]) > len("ans_")
+
+
+# ---------------------------------------------------------------------------
+# build_rag_search_query
+# ---------------------------------------------------------------------------
+
+def test_search_minimal_request_sets_mode_search():
+    assert build_rag_search_query({"question": "What is TP53?"}) == {
+        "query": "What is TP53?", "study": "default", "mode": "search",
+    }
+
+
+def test_search_domain_maps_to_study():
+    assert build_rag_search_query({"question": "q", "domain": "Oncology"})["study"] == "Oncology"
+
+
+@pytest.mark.parametrize("max_results", [1, 10, 25.0])
+def test_search_max_results_maps_to_top_k(max_results):
+    assert build_rag_search_query({"question": "q", "max_results": max_results})["top_k"] == int(max_results)
+
+
+@pytest.mark.parametrize("max_results", [0, -1, "10", None, True])
+def test_search_invalid_or_absent_max_results_omits_top_k(max_results):
+    body = {"question": "q"}
+    if max_results is not None:
+        body["max_results"] = max_results
+    assert "top_k" not in build_rag_search_query(body)
+
+
+@pytest.mark.parametrize("body", [{}, {"question": ""}, {"question": "   "}, {"question": 5}])
+def test_search_missing_or_blank_question_is_rejected(body):
+    with pytest.raises(UnsupportedRequestError) as exc:
+        build_rag_search_query(body)
+    assert exc.value.field == "question"
+
+
+def test_search_non_dict_body_is_rejected():
+    with pytest.raises(UnsupportedRequestError) as exc:
+        build_rag_search_query(["not", "a", "dict"])
+    assert exc.value.field == "body"
+
+
+@pytest.mark.parametrize("field", ["model", "use_own_key", "stream"])
+def test_search_does_not_reject_answer_only_fields(field):
+    # Unlike build_rag_query, search never calls an LLM regardless of
+    # these fields, so there is nothing to reject them for.
+    build_rag_search_query({"question": "q", field: "anything-truthy-or-not"})  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# build_public_search
+# ---------------------------------------------------------------------------
+
+def test_search_builds_full_public_shape_from_rag_result():
+    rag_result = {
+        "study": "Oncology", "mode": "search", "summary": None,
+        "documents": [{"pmid": "123", "title": "TP53 review", "year": 2021,
+                        "citation_confidence": 0.9, "abstract": "TP53 is a tumor suppressor."}],
+    }
+    result = build_public_search(rag_result, domain="Oncology", request_id="req-1", latency_ms=7)
+    assert result == {
+        "id": "srch_req-1",
+        "results": [{"pmid": "123", "title": "TP53 review", "year": 2021, "score": 0.9,
+                     "snippet": "TP53 is a tumor suppressor."}],
+        "domain": "Oncology",
+        "usage": {"searches": 1, "latency_ms": 7},
+    }
+
+
+def test_search_falls_back_to_similarity_score_when_citation_confidence_absent():
+    rag_result = {"documents": [{"pmid": "1", "similarity_score": 0.5}]}
+    result = build_public_search(rag_result, domain=None, request_id="r", latency_ms=1)
+    assert result["results"] == [{"pmid": "1", "title": None, "year": None, "score": 0.5, "snippet": None}]
+
+
+def test_search_empty_documents_yields_empty_results():
+    result = build_public_search({}, domain=None, request_id="r", latency_ms=1)
+    assert result["results"] == []
+    assert "answer" not in result
+
+
+def test_search_domain_falls_back_to_caller_supplied_value_when_rag_result_has_no_study():
+    result = build_public_search({}, domain="Oncology", request_id="r", latency_ms=1)
+    assert result["domain"] == "Oncology"
+
+
+def test_search_missing_request_id_still_produces_an_id():
+    result = build_public_search({}, domain=None, request_id="", latency_ms=1)
+    assert result["id"].startswith("srch_") and len(result["id"]) > len("srch_")

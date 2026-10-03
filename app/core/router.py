@@ -13,6 +13,16 @@ SERVICE_MAP = {
     # SERVICE_MAP entry: this gateway proxies to it, it does not implement
     # any ServiceNow logic itself.
     "servicenow": "http://servicenow:8097",
+    # Public API v1 ("M1": GET /v1/usage): the gateway proxies this one
+    # read-only call into omnibioai-billing's existing
+    # GET /billing/organizations/{id}/subscription/usage-limits, reusing
+    # the same build_upstream_headers()-forwarded bearer token every
+    # other SERVICE_MAP entry relies on -- billing-service independently
+    # verifies it against the same shared-platform JWT secret (see its
+    # app/core/iam.py::_verify_caller), exactly like omnibioai-rag does
+    # for the "rag" entry above. See SERVICE_PERMISSION_MAP below for the
+    # permission this requires.
+    "billing": "http://billing-service:8005",
 }
 
 
@@ -51,6 +61,13 @@ SERVICE_PERMISSION_MAP = {
     # finer check" pattern omnibioai-rag's dataset.read/app/api/iam.py
     # already established, not a new authorization model.
     "servicenow": "servicenow_incident.read",
+    # Public API v1 (GET /v1/usage): omnibioai-auth's Permission Registry
+    # already has "usage.read" registered as "reserved -- not yet
+    # enforced by any route" -- the exact same state dataset.read/
+    # model.use/workflow.execute were in before this gateway's IAM
+    # Foundation integration made them real. This is usage.read's first
+    # real consumer.
+    "billing": "usage.read",
 }
 
 
