@@ -14,6 +14,7 @@ import app.main as _main_mod
 import app.routes.v1 as v1
 from app.core.config import Config
 from app.core.router import service_for_path
+from app.services.outbox import Outbox
 from app.services.v1_store import V1Store, request_fingerprint
 
 KEY = "omni_sk_" + "a" * 40
@@ -22,8 +23,19 @@ USER = {
     "org_id": "42", "org_role": [], "token_type": "api_key", "api_key_id": 7,
     "access_token": "minted.jwt.token",
 }
-ANSWER = {"answer": "TP53 [PMID:1]", "citations": [{"pmid": "1"}]}
-BODY = {"query": "What does TP53 do?"}
+# BODY is the frozen *public* request shape; RAG_BODY is what build_rag_query
+# (app/services/literature_contract.py) translates it into, and what the
+# fake upstream actually receives. RAG_RESPONSE is RAG's own internal
+# response shape (what the fake upstream returns); PUBLIC_CITATIONS is
+# what build_public_answer translates RAG_RESPONSE's documents into.
+BODY = {"question": "What does TP53 do?"}
+RAG_BODY = {"query": "What does TP53 do?", "study": "default"}
+RAG_RESPONSE = {
+    "study": "default",
+    "summary": {"text": "TP53 [PMID:1]", "model": "llama3"},
+    "documents": [{"pmid": "1", "title": "TP53 review", "year": 2021, "citation_confidence": 0.9}],
+}
+PUBLIC_CITATIONS = [{"pmid": "1", "title": "TP53 review", "year": 2021, "score": 0.9}]
 
 
 class FakeRedis:
@@ -68,15 +80,20 @@ class BrokenRedis:
 
 
 @pytest.fixture
-def redis():
+def redis(tmp_path):
     fake = FakeRedis()
-    with patch.object(v1.store, "redis", fake), patch.object(v1.store, "usage_redis", fake):
+    outbox = Outbox(str(tmp_path / "usage_outbox.db"))
+    with (
+        patch.object(v1.store, "redis", fake),
+        patch.object(v1.store, "usage_redis", fake),
+        patch.object(v1.store, "outbox", outbox),
+    ):
         yield fake
 
 
 @pytest.fixture
 def upstream():
-    forward = AsyncMock(return_value=(200, ANSWER))
+    forward = AsyncMock(return_value=(200, RAG_RESPONSE))
     with (
         patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=USER)),
         patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})) as policy,
@@ -110,13 +127,25 @@ def test_service_for_path():
 def test_answer_forwards_to_rag_and_bills_once(client, redis, upstream):
     resp = _post(client)
     assert resp.status_code == 200
-    assert resp.json() == ANSWER
+    body = resp.json()
+    assert body["answer"] == "TP53 [PMID:1]"
+    assert body["citations"] == PUBLIC_CITATIONS
+    assert body["model"] == "llama3"
+    assert body["model_source"] == "omnibioai_gpu"
+    assert body["domain"] == "default"
+    assert body["id"].startswith("ans_")
+    assert body["usage"]["queries"] == 1
+    assert body["usage"]["billed_by"] == "query"
+    assert body["usage"]["input_tokens"] is None and body["usage"]["output_tokens"] is None
+    assert isinstance(body["usage"]["latency_ms"], int) and body["usage"]["latency_ms"] >= 0
     assert resp.headers["X-RateLimit-Limit"] == str(Config.V1_RATE_LIMIT_PER_MINUTE)
     assert resp.headers["X-Request-Id"]
 
     kwargs = upstream.call_args.kwargs
     assert kwargs["url"] == "http://rag:8096/v1/query"
-    assert kwargs["method"] == "POST" and kwargs["body"] == BODY
+    # The public request shape (BODY) is translated to RAG's own shape
+    # (RAG_BODY) before forwarding -- never passed through unchanged.
+    assert kwargs["method"] == "POST" and kwargs["body"] == RAG_BODY
     assert kwargs["headers"]["Authorization"] == "Bearer minted.jwt.token"
     assert upstream.policy.call_args.kwargs["service"] == "rag"
     assert upstream.policy.call_args.kwargs["required_permission"] == "dataset.read"
@@ -146,6 +175,39 @@ def test_rejects_non_json_body(client, redis, upstream):
     resp = _post(client, raw=b"not json")
     assert resp.status_code == 400
     assert resp.json()["error"]["type"] == "invalid_request"
+
+
+def test_rejects_missing_question(client, redis, upstream):
+    resp = _post(client, body={})
+    assert resp.status_code == 400
+    error = resp.json()["error"]
+    assert error["type"] == "unsupported_request" and error["detail"]["field"] == "question"
+    upstream.assert_not_called()
+
+
+@pytest.mark.parametrize("field,body", [
+    ("model", {"question": "q", "model": "claude"}),
+    ("use_own_key", {"question": "q", "use_own_key": True}),
+    ("stream", {"question": "q", "stream": True}),
+])
+def test_rejects_not_yet_supported_fields_without_calling_upstream_or_billing(client, redis, upstream, field, body):
+    resp = _post(client, body=body)
+    assert resp.status_code == 400
+    error = resp.json()["error"]
+    assert error["type"] == "unsupported_request" and error["detail"]["field"] == field
+    upstream.assert_not_called()
+    assert _usage(redis) == []
+
+
+def test_model_default_and_none_are_both_accepted(client, redis, upstream):
+    assert _post(client, body={"question": "q", "model": "default"}).status_code == 200
+    assert _post(client, body={"question": "q", "model": None}).status_code == 200
+
+
+def test_domain_maps_to_rag_study_and_max_citations_maps_to_top_k(client, redis, upstream):
+    resp = _post(client, body={"question": "q", "domain": "Oncology", "max_citations": 3})
+    assert resp.status_code == 200
+    assert upstream.call_args.kwargs["body"] == {"query": "q", "study": "Oncology", "top_k": 3}
 
 
 def test_rate_limit(client, redis, upstream, monkeypatch):
@@ -192,7 +254,7 @@ def test_idempotent_retry_replays_without_running_or_billing_again(client, redis
 
 def test_idempotency_key_reused_with_other_body_is_rejected(client, redis, upstream):
     _post(client, idem="k")
-    resp = _post(client, body={"query": "different"}, idem="k")
+    resp = _post(client, body={"question": "different"}, idem="k")
     assert resp.status_code == 422
     assert resp.json()["error"]["type"] == "idempotency_key_reused"
 
@@ -218,7 +280,7 @@ def test_failed_request_releases_key_and_is_not_billed(client, redis, upstream):
     assert resp.status_code == 502
     assert resp.json()["error"]["type"] == "upstream_error"
     assert _usage(redis) == []
-    upstream.return_value = (200, ANSWER)
+    upstream.return_value = (200, RAG_RESPONSE)
     assert _post(client, idem="fail-1").status_code == 200
     assert len(_usage(redis)) == 1
 
@@ -252,17 +314,50 @@ def test_unauthenticated_v1_is_rejected(client):
     assert client.post("/v1/literature/answers", json=BODY).status_code == 401
 
 
-def test_redis_outage_fails_open_for_limits_and_idempotency(client, upstream):
+def test_redis_outage_fails_open_for_limits_and_idempotency(client, upstream, tmp_path):
     broken = BrokenRedis()
-    with patch.object(v1.store, "redis", broken), patch.object(v1.store, "usage_redis", broken):
+    outbox = Outbox(str(tmp_path / "usage_outbox.db"))
+    with (
+        patch.object(v1.store, "redis", broken),
+        patch.object(v1.store, "usage_redis", broken),
+        patch.object(v1.store, "outbox", outbox),
+    ):
         resp = _post(client, idem="x")
     assert resp.status_code == 200
+    # The lost usage event landed in the outbox instead of being discarded.
+    assert outbox.pending_count() == 1
 
 
-def test_store_edge_cases():
+def test_emit_usage_drains_pending_outbox_once_redis_recovers(tmp_path):
+    import asyncio
+
+    with patch("app.services.v1_store.aioredis.from_url", return_value=FakeRedis()):
+        store = V1Store("redis://x", "redis://y", outbox_path=str(tmp_path / "outbox.db"))
+    store.usage_redis = BrokenRedis()
+
+    # First call: Redis is down, the event is written to the outbox instead of lost.
+    ok = asyncio.run(store.emit_usage(
+        org_id="42", user_id="5", resource="literature.answer", trace_id="t-1",
+        dedup_key="d-1", metadata={},
+    ))
+    assert ok is False
+    assert store.outbox.pending_count() == 1
+
+    # Redis recovers; the next call both emits its own event and drains the backlog.
+    store.usage_redis = FakeRedis()
+    ok = asyncio.run(store.emit_usage(
+        org_id="42", user_id="5", resource="literature.answer", trace_id="t-2",
+        dedup_key="d-2", metadata={},
+    ))
+    assert ok is True
+    assert store.outbox.pending_count() == 0
+    assert len(store.usage_redis.streams[Config.USAGE_STREAM]) == 2
+
+
+def test_store_edge_cases(tmp_path):
     import asyncio
     with patch("app.services.v1_store.aioredis.from_url", return_value=FakeRedis()):
-        store = V1Store("redis://x", "redis://y")
+        store = V1Store("redis://x", "redis://y", outbox_path=str(tmp_path / "outbox.db"))
     store.redis.kv["gateway:v1:quota:1:r"] = "not-a-number"
     assert asyncio.run(store.quota_remaining("1", "r")) is None
     key = store._idem_key("s", "k")
@@ -322,9 +417,10 @@ def test_memory_store_prunes_when_full(monkeypatch):
     asyncio.run(fill())
 
 
-def test_store_uses_memory_without_redis_url():
+def test_store_uses_memory_without_redis_url(tmp_path):
     from app.services.v1_store import MemoryStore
 
+    outbox_path = str(tmp_path / "outbox.db")
     with patch("app.services.v1_store.aioredis.from_url", return_value=FakeRedis()):
-        assert isinstance(V1Store("", "redis://usage").redis, MemoryStore)
-        assert isinstance(V1Store("redis://v1", "redis://usage").redis, FakeRedis)
+        assert isinstance(V1Store("", "redis://usage", outbox_path=outbox_path).redis, MemoryStore)
+        assert isinstance(V1Store("redis://v1", "redis://usage", outbox_path=outbox_path).redis, FakeRedis)
