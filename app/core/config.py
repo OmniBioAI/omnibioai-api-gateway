@@ -25,3 +25,10 @@ class Config:
     JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
     SERVICE_SECRET = os.getenv("GATEWAY_SECRET", "dev-secret")
     ROUTE_TIMEOUT = int(os.getenv("ROUTE_TIMEOUT", "15"))
+    # omni_sk_ API keys: the gateway trades a key for a short-lived access
+    # token at omnibioai-auth's POST /auth/api-keys/exchange, which only
+    # accepts calls carrying this shared secret. Empty = API keys rejected.
+    API_KEY_EXCHANGE_SECRET = os.getenv("API_KEY_EXCHANGE_SECRET", "")
+    # Upper bound on how long one exchange is reused; the minted token's
+    # own expiry (minus a safety margin) caps it further.
+    API_KEY_CACHE_TTL = int(os.getenv("API_KEY_CACHE_TTL", "60"))

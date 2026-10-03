@@ -1,7 +1,7 @@
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from app.services.iam_client import IAMClient
+from app.services.iam_client import IAMClient, is_api_key
 from app.services.audit_client import build_audit_event, fire_audit
 
 # /docs and /openapi.json are exempted deliberately: the OpenAPI spec is
@@ -35,7 +35,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             ))
             return JSONResponse({"error": "missing token"}, status_code=401)
 
-        user = await self.iam.validate(token)
+        api_key = is_api_key(token)
+        user = await (self.iam.validate_api_key(token) if api_key else self.iam.validate(token))
 
         if not user:
             fire_audit(build_audit_event(
@@ -43,13 +44,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 event_type="auth_failed",
                 action=f"{request.method} {request.url.path}",
                 decision="deny",
-                reason="invalid_token",
+                reason="invalid_api_key" if api_key else "invalid_token",
                 trace_id=trace_id,
             ))
-            return JSONResponse({"error": "invalid token"}, status_code=401)
+            return JSONResponse({"error": "invalid api key" if api_key else "invalid token"}, status_code=401)
 
         request.state.user = user
-        request.state.token = token
+        # For an API key, the token forwarded downstream is the short-lived
+        # JWT auth minted for it -- the raw omni_sk_ key never leaves the
+        # gateway (gateway.py forwards request.state.token as Bearer).
+        request.state.token = user["access_token"] if api_key else token
         # IAM Foundation gateway integration (Step 3): the canonical
         # identity shape downstream gateway code (permission derivation,
         # header propagation) reads from -- request.state.user above is
@@ -63,8 +67,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.identity = {
             "user_id": user.get("user_id"),
             "organization_id": user.get("org_id"),
-            "client_id": None,
+            "client_id": f"api_key:{user['api_key_id']}" if api_key else None,
             "permissions": user.get("permissions", []),
-            "token_type": "user",
+            "token_type": "api_key" if api_key else "user",
         }
         return await call_next(request)

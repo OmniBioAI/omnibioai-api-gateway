@@ -31,9 +31,11 @@ async def _invalidation_loop():
     re-validates against the auth service (zero-trust: revoke = immediate effect).
     Restarts automatically on failure.
     """
-    async def on_invalidate(user_id: str, token: str):
+    async def on_invalidate(user_id: str, token: str, api_key_hash: str = ""):
         if token:
             await iam.evict(token)
+        if api_key_hash:
+            await iam.evict_api_key(api_key_hash)
 
     while True:
         try:
