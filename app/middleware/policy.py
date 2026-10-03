@@ -1,7 +1,7 @@
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from app.core.router import resolve_required_permission
+from app.core.router import resolve_required_permission, service_for_path
 from app.services.policy_client import PolicyClient
 from app.services.audit_client import build_audit_event, fire_audit
 
@@ -49,7 +49,7 @@ class PolicyMiddleware(BaseHTTPMiddleware):
         # this only makes its input richer than the previous auto-derived
         # "post.samples.123"-style action string, for services this
         # gateway actually knows the IAM meaning of.
-        service = request.url.path.strip("/").split("/", 1)[0]
+        service = service_for_path(request.url.path)
         required_permission = resolve_required_permission(service)
 
         identity = getattr(request.state, "identity", None)

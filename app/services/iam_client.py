@@ -48,6 +48,21 @@ def _sign_cache_entry(token: str, body: str) -> str:
     return hmac.new(_cache_mac_key(), f"{token}\n{body}".encode(), hashlib.sha256).hexdigest()
 
 
+API_KEY_PREFIX = "omni_sk_"
+
+
+def is_api_key(token: str) -> bool:
+    return token.startswith(API_KEY_PREFIX)
+
+
+def api_key_hash(api_key: str) -> str:
+    """SHA-256 hex of the full key -- the same value omnibioai-auth stores
+    (apikey_service._hash_key) and publishes on revoke, so the cache entry
+    below can be evicted from that message alone. The key itself is never
+    used as (or inside) a Redis key name."""
+    return hashlib.sha256(api_key.encode()).hexdigest()
+
+
 class IAMClient:
     """Gateway's IAM integration point. Token *verification* itself
     (RS256/JWKS signature check, HS256 fallback, expiration) is delegated
@@ -233,8 +248,106 @@ class IAMClient:
         return None
 
     # ------------------------------------------------------------------
+    # API keys (omni_sk_...): exchanged at the auth service for a
+    # short-lived access token, cached under the key's hash.
+    #
+    # Same HMAC-signed cache-entry scheme as JWTs above, keyed by the key's
+    # hash rather than the key. The cached body includes the minted access
+    # token: AuthMiddleware forwards *that* downstream (services there
+    # verify JWTs, not API keys), so the raw key never leaves the gateway.
+    # The entry lives at most API_KEY_CACHE_TTL seconds and always expires
+    # 30 s before the minted token does; revoking a key evicts it at once
+    # via the "api_key_hash" policy:invalidate message (see main.py).
+    # ------------------------------------------------------------------
+    # Under gateway:iam:* -- the only key pattern the gateway's Redis ACL user
+    # (redis_api_gateway_iam, Studio config/redis/acl-policy.json) may touch.
+    # A JWT never starts with "apikey:", so this cannot collide with the
+    # token cache above.
+    _API_KEY_CACHE_PREFIX = "gateway:iam:apikey:"
+
+    async def _get_cached_api_key(self, key_hash: str) -> Optional[dict]:
+        try:
+            raw = await self.redis.get(f"{self._API_KEY_CACHE_PREFIX}{key_hash}")
+            if not raw:
+                return None
+            mac, sep, body = raw.partition(":")
+            if not sep or not hmac.compare_digest(mac, _sign_cache_entry(f"apikey:{key_hash}", body)):
+                await self.evict_api_key(key_hash)
+                return None
+            return json.loads(body)
+        except Exception:
+            return None
+
+    async def _set_cached_api_key(self, key_hash: str, user: dict, ttl: int):
+        if ttl <= 0:
+            return
+        try:
+            body = json.dumps(user)
+            await self.redis.setex(
+                f"{self._API_KEY_CACHE_PREFIX}{key_hash}",
+                ttl,
+                f"{_sign_cache_entry(f'apikey:{key_hash}', body)}:{body}",
+            )
+        except Exception:
+            pass
+
+    async def evict_api_key(self, key_hash: str):
+        try:
+            await self.redis.delete(f"{self._API_KEY_CACHE_PREFIX}{key_hash}")
+        except Exception:
+            pass
+
+    async def validate_api_key(self, api_key: str) -> Optional[dict]:
+        """Resolve an omni_sk_ key to an identity dict shaped like
+        validate()'s, plus `access_token` (the minted JWT to forward) and
+        `api_key_id`. None for any invalid, revoked or unexchangeable key,
+        and always None when API_KEY_EXCHANGE_SECRET is unset."""
+        if not Config.API_KEY_EXCHANGE_SECRET or not is_api_key(api_key):
+            return None
+        key_hash = api_key_hash(api_key)
+        cached = await self._get_cached_api_key(key_hash)
+        if cached:
+            return cached
+
+        for attempt in range(2):
+            try:
+                res = await self.http.post(
+                    f"{self.base_url}/auth/api-keys/exchange",
+                    json={"api_key": api_key},
+                    headers={"X-Api-Key-Exchange-Secret": Config.API_KEY_EXCHANGE_SECRET},
+                    timeout=3,
+                )
+                if res.status_code != 200:
+                    await self.evict_api_key(key_hash)
+                    return None
+                data = res.json()
+                user = {
+                    "user_id": str(data["user_id"]),
+                    "email": "",
+                    "roles": [],
+                    "permissions": list(data.get("permissions", [])),
+                    "org_id": str(data["organization_id"]),
+                    "org_role": [],
+                    "schema_version": 2,
+                    "valid": True,
+                    "token_type": "api_key",
+                    "api_key_id": data["api_key_id"],
+                    "access_token": data["access_token"],
+                }
+                ttl = min(Config.API_KEY_CACHE_TTL, int(data.get("expires_in", 0)) - 30)
+                await self._set_cached_api_key(key_hash, user, ttl)
+                return user
+            except httpx.TimeoutException:
+                if attempt == 0:
+                    continue
+                return None
+            except Exception:
+                return None
+        return None
+
+    # ------------------------------------------------------------------
     # Redis Pub/Sub — subscribe to "policy:invalidate" channel
-    # on_invalidate(user_id, token) is called for each message
+    # on_invalidate(user_id, token[, api_key_hash=...]) is called for each message
     # ------------------------------------------------------------------
     async def subscribe_invalidation(self, on_invalidate: Callable):
         pubsub = self.redis.pubsub()
@@ -243,9 +356,14 @@ class IAMClient:
             if message["type"] == "message":
                 try:
                     data = json.loads(message["data"])
+                    # api_key_hash (sent by auth on API-key revoke) is passed
+                    # only when present, so two-argument callbacks keep
+                    # working for every user/token message.
+                    extra = {"api_key_hash": data["api_key_hash"]} if data.get("api_key_hash") else {}
                     await on_invalidate(
                         data.get("user_id", ""),
                         data.get("token", ""),
+                        **extra,
                     )
                 except Exception:
                     pass

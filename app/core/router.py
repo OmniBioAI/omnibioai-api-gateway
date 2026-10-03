@@ -63,3 +63,19 @@ def resolve_required_permission(service: str) -> str | None:
     PolicyMiddleware's remote policy-engine call remains the actual
     authorization decision either way."""
     return SERVICE_PERMISSION_MAP.get(service)
+
+# Public /v1 API (app/routes/v1.py): which downstream service, and so which
+# IAM permission, each /v1/<area>/ path stands for. PolicyMiddleware uses
+# this so /v1/literature/* is authorized exactly like the rag service.
+V1_SERVICE_MAP = {
+    "literature": "rag",
+}
+
+
+def service_for_path(path: str) -> str:
+    """The SERVICE_MAP key a request path targets: the first path segment,
+    or for /v1/<area>/... the service V1_SERVICE_MAP maps <area> to."""
+    parts = path.strip("/").split("/")
+    if parts[0] == "v1" and len(parts) > 1 and parts[1] in V1_SERVICE_MAP:
+        return V1_SERVICE_MAP[parts[1]]
+    return parts[0]

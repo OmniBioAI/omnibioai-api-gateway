@@ -25,3 +25,25 @@ class Config:
     JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
     SERVICE_SECRET = os.getenv("GATEWAY_SECRET", "dev-secret")
     ROUTE_TIMEOUT = int(os.getenv("ROUTE_TIMEOUT", "15"))
+    # omni_sk_ API keys: the gateway trades a key for a short-lived access
+    # token at omnibioai-auth's POST /auth/api-keys/exchange, which only
+    # accepts calls carrying this shared secret. Empty = API keys rejected.
+    API_KEY_EXCHANGE_SECRET = os.getenv("API_KEY_EXCHANGE_SECRET", "")
+    # Upper bound on how long one exchange is reused; the minted token's
+    # own expiry (minus a safety margin) caps it further.
+    API_KEY_CACHE_TTL = int(os.getenv("API_KEY_CACHE_TTL", "60"))
+
+    # Public /v1 API (app/routes/v1.py). Rate-limit, idempotency and quota
+    # state lives under gateway:v1:* in the Redis at V1_REDIS_URL, which
+    # needs its own ACL user (incr/expire/get/set/del/decr on gateway:v1:*).
+    # Unset = an in-process store: correct for a single gateway replica
+    # (Studio runs one), lost on restart, and quota counters written by
+    # omnibioai-billing are then not visible.
+    V1_REDIS_URL = os.getenv("V1_REDIS_URL", "")
+    V1_RATE_LIMIT_PER_MINUTE = int(os.getenv("V1_RATE_LIMIT_PER_MINUTE", "60"))
+    V1_IDEMPOTENCY_TTL = int(os.getenv("V1_IDEMPOTENCY_TTL", "86400"))
+    # Billable usage goes to the same usage:events stream every other
+    # producer writes (omnibioai-usage-client wire format), consumed by
+    # omnibioai-billing.
+    USAGE_REDIS_URL = os.getenv("USAGE_REDIS_URL", REDIS_URL)
+    USAGE_STREAM = os.getenv("USAGE_STREAM", "usage:events")
