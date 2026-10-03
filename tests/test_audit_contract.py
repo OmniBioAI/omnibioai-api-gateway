@@ -233,8 +233,14 @@ def test_every_audit_transport_call_site_uses_build_audit_event():
             if isinstance(arg, ast.Call):
                 call_name = arg.func.id if isinstance(arg.func, ast.Name) else getattr(arg.func, "attr", None)
                 if call_name != "build_audit_event":
-                    offending.append(f"{path.relative_to(REPO_ROOT)}: {name}() called with {call_name}(...) instead of build_audit_event(...)")
+                    offending.append(
+                        f"{path.relative_to(REPO_ROOT)}: {name}() called with {call_name}(...) "
+                        "instead of build_audit_event(...)"
+                    )
             elif isinstance(arg, ast.Dict):
-                offending.append(f"{path.relative_to(REPO_ROOT)}: {name}() called with a raw dict literal instead of build_audit_event(...)")
+                offending.append(
+                    f"{path.relative_to(REPO_ROOT)}: {name}() called with a raw dict literal "
+                    "instead of build_audit_event(...)"
+                )
 
     assert offending == [], "\n".join(offending)

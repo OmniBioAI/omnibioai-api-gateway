@@ -11,7 +11,6 @@ default dicts across calls.
 Developer:
     Manish Kumar <manish@omnibioai.org>
 """
-import asyncio
 import uuid
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -21,7 +20,7 @@ async def test_fire_audit_in_running_loop_creates_task():
     """fire_audit must schedule _emit via create_task when a loop is running."""
     from app.services.audit_client import fire_audit
 
-    with patch("app.services.audit_client._emit", new_callable=AsyncMock) as mock_emit:
+    with patch("app.services.audit_client._emit", new_callable=AsyncMock):
         with patch("app.services.audit_client.asyncio.create_task") as mock_create:
             fire_audit({"event": "test"})
             mock_create.assert_called_once()
@@ -77,7 +76,7 @@ def test_fire_audit_scheduling_failure_after_get_event_loop_is_also_logged(capsy
 
 async def test_audit_log_calls_fire_audit():
     """audit_log (middleware compat wrapper) must delegate to fire_audit."""
-    from app.services.audit_client import audit_log, fire_audit
+    from app.services.audit_client import audit_log
 
     with patch("app.services.audit_client.fire_audit") as mock_fire:
         await audit_log({"event": "request"})
@@ -131,7 +130,8 @@ async def test_emit_signature_covers_tenant_fields():
         await audit_client._emit(event)
         data = mock_redis.xadd.call_args.args[1]["data"]
         assert json.loads(data)["organization_id"] == "org-verified"
-        assert audit_client.sign_audit_event("gateway", data, audit_client.Config.JWT_SECRET) == mock_redis.xadd.call_args.args[1]["sig"]
+        expected_sig = audit_client.sign_audit_event("gateway", data, audit_client.Config.JWT_SECRET)
+        assert expected_sig == mock_redis.xadd.call_args.args[1]["sig"]
     finally:
         audit_client._redis = original
 

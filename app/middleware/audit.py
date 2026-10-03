@@ -1,9 +1,8 @@
-import asyncio
 import time
 
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.services.audit_client import _emit, build_audit_event, fire_audit
+from app.services.audit_client import build_audit_event, fire_audit
 
 
 class AuditMiddleware(BaseHTTPMiddleware):
