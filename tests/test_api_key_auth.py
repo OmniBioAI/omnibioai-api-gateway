@@ -100,7 +100,7 @@ def test_exchange_success_builds_identity_and_caches_by_hash(iam, exchange_secre
     assert http.post.call_args.kwargs["headers"] == {"X-Api-Key-Exchange-Secret": "s3cret"}
     assert http.post.call_args.kwargs["json"] == {"api_key": KEY}
 
-    cache_key = f"gateway:apikey:{api_key_hash(KEY)}"
+    cache_key = f"gateway:iam:apikey:{api_key_hash(KEY)}"
     assert list(redis.store) == [cache_key]
     assert KEY not in cache_key and KEY not in redis.store[cache_key]
     assert redis.ttls[cache_key] == min(Config.API_KEY_CACHE_TTL, 300 - 30)
@@ -120,7 +120,7 @@ def test_cache_ttl_never_outlives_minted_token(iam, exchange_secret):
 @pytest.mark.parametrize("status", [401, 403, 503, 500])
 def test_exchange_failure_is_rejected_and_evicted(iam, exchange_secret, status):
     client, redis, http = iam
-    redis.store[f"gateway:apikey:{api_key_hash(KEY)}"] = "stale"
+    redis.store[f"gateway:iam:apikey:{api_key_hash(KEY)}"] = "stale"
     http.post.return_value = _response(status, {"detail": "nope"})
     assert asyncio.run(client.validate_api_key(KEY)) is None
     assert redis.store == {}
@@ -149,18 +149,18 @@ def test_tampered_or_replayed_cache_entry_is_not_trusted(iam, exchange_secret):
     client, redis, http = iam
     key_hash = api_key_hash(KEY)
     forged = json.dumps({"user_id": "1", "org_id": "999", "access_token": "forged", "api_key_id": 1})
-    redis.store[f"gateway:apikey:{key_hash}"] = f"deadbeef:{forged}"
+    redis.store[f"gateway:iam:apikey:{key_hash}"] = f"deadbeef:{forged}"
     http.post.return_value = _response(401, {})
     assert asyncio.run(client.validate_api_key(KEY)) is None
 
     other_hash = api_key_hash("omni_sk_" + "b" * 40)
-    redis.store[f"gateway:apikey:{key_hash}"] = f"{_sign_cache_entry(f'apikey:{other_hash}', forged)}:{forged}"
+    redis.store[f"gateway:iam:apikey:{key_hash}"] = f"{_sign_cache_entry(f'apikey:{other_hash}', forged)}:{forged}"
     assert asyncio.run(client.validate_api_key(KEY)) is None
 
 
 def test_evict_api_key_and_cache_errors_are_swallowed(iam, exchange_secret):
     client, redis, _ = iam
-    redis.store[f"gateway:apikey:{api_key_hash(KEY)}"] = "x"
+    redis.store[f"gateway:iam:apikey:{api_key_hash(KEY)}"] = "x"
     asyncio.run(client.evict_api_key(api_key_hash(KEY)))
     assert redis.store == {}
 

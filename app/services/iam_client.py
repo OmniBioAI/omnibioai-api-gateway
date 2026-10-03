@@ -259,7 +259,11 @@ class IAMClient:
     # 30 s before the minted token does; revoking a key evicts it at once
     # via the "api_key_hash" policy:invalidate message (see main.py).
     # ------------------------------------------------------------------
-    _API_KEY_CACHE_PREFIX = "gateway:apikey:"
+    # Under gateway:iam:* -- the only key pattern the gateway's Redis ACL user
+    # (redis_api_gateway_iam, Studio config/redis/acl-policy.json) may touch.
+    # A JWT never starts with "apikey:", so this cannot collide with the
+    # token cache above.
+    _API_KEY_CACHE_PREFIX = "gateway:iam:apikey:"
 
     async def _get_cached_api_key(self, key_hash: str) -> Optional[dict]:
         try:
