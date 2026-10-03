@@ -34,9 +34,12 @@ class Config:
     API_KEY_CACHE_TTL = int(os.getenv("API_KEY_CACHE_TTL", "60"))
 
     # Public /v1 API (app/routes/v1.py). Rate-limit, idempotency and quota
-    # keys live under gateway:v1:* on their own Redis ACL user, separate
-    # from the IAM cache user above.
-    V1_REDIS_URL = os.getenv("V1_REDIS_URL", REDIS_URL)
+    # state lives under gateway:v1:* in the Redis at V1_REDIS_URL, which
+    # needs its own ACL user (incr/expire/get/set/del/decr on gateway:v1:*).
+    # Unset = an in-process store: correct for a single gateway replica
+    # (Studio runs one), lost on restart, and quota counters written by
+    # omnibioai-billing are then not visible.
+    V1_REDIS_URL = os.getenv("V1_REDIS_URL", "")
     V1_RATE_LIMIT_PER_MINUTE = int(os.getenv("V1_RATE_LIMIT_PER_MINUTE", "60"))
     V1_IDEMPOTENCY_TTL = int(os.getenv("V1_IDEMPOTENCY_TTL", "86400"))
     # Billable usage goes to the same usage:events stream every other

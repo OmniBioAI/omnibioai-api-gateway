@@ -270,3 +270,61 @@ def test_store_edge_cases():
     store.redis.kv.pop(key)
     store.redis.set = AsyncMock(return_value=None)
     assert asyncio.run(store.idempotency_begin("s", "k", "f")) == {"state": "in_progress"}
+
+
+def test_memory_store_semantics():
+    import asyncio
+
+    from app.services.v1_store import MemoryStore
+
+    now = [0.0]
+    mem = MemoryStore(clock=lambda: now[0])
+
+    async def scenario():
+        assert await mem.incr("c") == 1
+        assert await mem.expire("c", 10) is True
+        assert await mem.incr("c") == 2
+        assert await mem.expire("missing", 10) is False
+        assert await mem.set("k", "v", nx=True, ex=5) is True
+        assert await mem.set("k", "w", nx=True, ex=5) is None
+        assert await mem.get("k") == "v"
+        assert await mem.decr("q") == -1
+        now[0] = 11.0
+        assert await mem.get("c") is None and await mem.get("k") is None
+        await mem.set("p", "1")
+        await mem.delete("p")
+        assert await mem.get("p") is None
+
+    asyncio.run(scenario())
+
+
+def test_memory_store_prunes_when_full(monkeypatch):
+    import asyncio
+
+    from app.services.v1_store import MemoryStore
+
+    monkeypatch.setattr(MemoryStore, "MAX_KEYS", 10)
+    now = [0.0]
+    mem = MemoryStore(clock=lambda: now[0])
+
+    async def fill():
+        for i in range(5):
+            await mem.set(f"short{i}", "x", ex=1)
+        for i in range(5):
+            await mem.set(f"long{i}", "x")
+        now[0] = 2.0
+        await mem.set("new", "x")
+        assert not any(k.startswith("short") for k in mem._data)
+        for i in range(10):
+            await mem.set(f"more{i}", "x")
+        assert len(mem._data) <= 10
+
+    asyncio.run(fill())
+
+
+def test_store_uses_memory_without_redis_url():
+    from app.services.v1_store import MemoryStore
+
+    with patch("app.services.v1_store.aioredis.from_url", return_value=FakeRedis()):
+        assert isinstance(V1Store("", "redis://usage").redis, MemoryStore)
+        assert isinstance(V1Store("redis://v1", "redis://usage").redis, FakeRedis)

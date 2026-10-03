@@ -32,9 +32,76 @@ def request_fingerprint(body) -> str:
     return _sha(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str))
 
 
+class MemoryStore:
+    """In-process stand-in for the handful of Redis commands V1Store uses,
+    with per-key expiry. Used when V1_REDIS_URL is unset: one gateway
+    process then enforces rate limits and idempotency on its own."""
+
+    MAX_KEYS = 100_000
+
+    def __init__(self, clock=time.monotonic):
+        self._data: dict[str, tuple[str, Optional[float]]] = {}
+        self._clock = clock
+
+    def _live(self, key):
+        item = self._data.get(key)
+        if item is None:
+            return None
+        value, expires = item
+        if expires is not None and expires <= self._clock():
+            del self._data[key]
+            return None
+        return value
+
+    def _prune(self):
+        if len(self._data) < self.MAX_KEYS:
+            return
+        now = self._clock()
+        for key in [k for k, (_, exp) in self._data.items() if exp is not None and exp <= now]:
+            del self._data[key]
+        if len(self._data) >= self.MAX_KEYS:
+            # Still full of live keys: drop the oldest-inserted tenth.
+            for key in list(self._data)[: self.MAX_KEYS // 10]:
+                del self._data[key]
+
+    def _put(self, key, value, ttl=None, keep_ttl=False):
+        expires = self._data[key][1] if keep_ttl and key in self._data else (
+            self._clock() + ttl if ttl else None)
+        self._prune()
+        self._data[key] = (str(value), expires)
+
+    async def incr(self, key):
+        value = int(self._live(key) or 0) + 1
+        self._put(key, value, keep_ttl=True)
+        return value
+
+    async def decr(self, key):
+        value = int(self._live(key) or 0) - 1
+        self._put(key, value, keep_ttl=True)
+        return value
+
+    async def expire(self, key, ttl):
+        if self._live(key) is None:
+            return False
+        self._data[key] = (self._data[key][0], self._clock() + ttl)
+        return True
+
+    async def get(self, key):
+        return self._live(key)
+
+    async def set(self, key, value, nx=False, ex=None):
+        if nx and self._live(key) is not None:
+            return None
+        self._put(key, value, ttl=ex)
+        return True
+
+    async def delete(self, key):
+        self._data.pop(key, None)
+
+
 class V1Store:
     def __init__(self, redis_url: str, usage_redis_url: str):
-        self.redis = aioredis.from_url(redis_url, decode_responses=True)
+        self.redis = aioredis.from_url(redis_url, decode_responses=True) if redis_url else MemoryStore()
         self.usage_redis = aioredis.from_url(usage_redis_url, decode_responses=True)
 
     # ---------------- rate limit (fixed one-minute window) ----------------
