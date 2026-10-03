@@ -148,8 +148,12 @@ async def _handle_billable_literature_call(
             return _error(409, "idempotency_in_progress",
                           "A request with this Idempotency-Key is still running.", request_id, headers)
 
-    remaining = await store.quota_remaining(org_id, resource)
-    if remaining is not None and remaining <= 0:
+    # Atomic reserve-before-work: decrements the quota counter now, not
+    # after the upstream call succeeds, so concurrent requests can never
+    # all observe "quota available" and all succeed (see
+    # V1Store.reserve_quota's own docstring for why the old check-then-
+    # later-decrement pair could overrun a near-zero quota).
+    if not await store.reserve_quota(org_id, resource):
         if idempotency_key is not None:
             await store.idempotency_finish(subject, idempotency_key, fingerprint, 402, None)
         return _error(402, "quota_exceeded", quota_exceeded_message, request_id, headers)
@@ -159,6 +163,9 @@ async def _handle_billable_literature_call(
     latency_ms = round((time.monotonic() - started) * 1000)
 
     if not 200 <= status < 300:
+        # The reservation above assumed this call would succeed and be
+        # billed; it didn't, so the unit must be given back.
+        await store.release_quota(org_id, resource)
         if idempotency_key is not None:
             await store.idempotency_finish(subject, idempotency_key, fingerprint, status, response)
         return _upstream_error(status, response, request_id, headers)
@@ -183,7 +190,6 @@ async def _handle_billable_literature_call(
             "idempotency_key_sha256": request_fingerprint(idempotency_key) if idempotency_key else None,
         },
     )
-    await store.consume_quota(org_id, resource)
     return JSONResponse(public_response, status_code=status, headers={**headers, "X-Request-Id": request_id})
 
 

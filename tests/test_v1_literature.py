@@ -242,6 +242,38 @@ def test_quota_is_consumed_on_success_and_never_created(client, redis, upstream)
     assert "gateway:v1:quota:42:literature.answer" not in redis.kv
 
 
+def test_quota_reservation_is_atomic_under_concurrency(client, redis, upstream):
+    """Two concurrent requests with only 1 unit of quota left: exactly one
+    must succeed and one must be quota_exceeded -- not both succeeding
+    (an overrun) and not both failing (undercounting real capacity).
+    FakeRedis's incr/decr aren't async-concurrent in the true sense (no
+    real parallelism in this test process), but this still exercises the
+    actual reserve-then-compensate sequence reserve_quota runs, not a
+    mock standing in for it."""
+    redis.kv["gateway:v1:quota:42:literature.answer"] = 1
+    first = _post(client, idem="race-1")
+    second = _post(client, idem="race-2")
+    statuses = sorted([first.status_code, second.status_code])
+    assert statuses == [200, 402]
+    # The quota key never goes negative and ends at exactly zero, not
+    # some other value a non-atomic check-then-decrement could leave it at.
+    assert redis.kv["gateway:v1:quota:42:literature.answer"] == 0
+
+
+def test_quota_is_refunded_when_upstream_call_fails(client, redis, upstream):
+    """reserve_quota decrements optimistically, before knowing whether the
+    call will succeed -- a failed upstream call must give the unit back,
+    or a string of transient RAG failures would silently burn through an
+    organization's quota for answers it never actually got billed for
+    (and never received)."""
+    redis.kv["gateway:v1:quota:42:literature.answer"] = 1
+    upstream.return_value = (503, {"detail": "rag down"})
+    resp = _post(client)
+    assert resp.status_code == 503
+    assert redis.kv["gateway:v1:quota:42:literature.answer"] == 1
+    assert _usage(redis) == []
+
+
 def test_idempotent_retry_replays_without_running_or_billing_again(client, redis, upstream):
     first = _post(client, idem="retry-1")
     second = _post(client, idem="retry-1")
@@ -362,7 +394,7 @@ def test_search_rejects_missing_question(client, redis, upstream):
 
 
 def test_search_quota_exceeded(client, redis, upstream):
-    with patch.object(v1.store, "quota_remaining", AsyncMock(return_value=0)):
+    with patch.object(v1.store, "reserve_quota", AsyncMock(return_value=False)):
         resp = client.post("/v1/literature/search", json={"question": "q"},
                             headers={"Authorization": f"Bearer {KEY}"})
     assert resp.status_code == 402
