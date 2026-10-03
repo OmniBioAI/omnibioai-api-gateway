@@ -222,6 +222,65 @@ def test_rate_limit(client, redis, upstream, monkeypatch):
     assert len(_usage(redis)) == 2
 
 
+def test_rate_limit_uses_the_organizations_plan_specific_override(client, redis, upstream, monkeypatch):
+    """omnibioai-billing publishes this org's plan-specific override
+    under gateway:v1:quota:{org}:ratelimit (see
+    gateway_quota_sync_service.py) -- when set, it wins over the
+    configured global default."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 100)
+    redis.kv["gateway:v1:quota:42:ratelimit"] = 1
+
+    first = _post(client)
+    assert first.status_code == 200
+    assert first.headers["X-RateLimit-Limit"] == "1"
+    second = _post(client)
+    assert second.status_code == 429
+
+
+def test_rate_limit_falls_back_to_the_global_default_when_no_override_is_set(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 100)
+    # No gateway:v1:quota:42:ratelimit key at all.
+
+    resp = _post(client)
+    assert resp.headers["X-RateLimit-Limit"] == "100"
+
+
+def test_rate_limit_override_of_zero_is_honored_not_treated_as_unset(client, redis, upstream, monkeypatch):
+    """`is not None`, not a truthiness/`or` check -- a plan-specific
+    limit of exactly 0 is a real (if unusual) value."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 100)
+    redis.kv["gateway:v1:quota:42:ratelimit"] = 0
+
+    resp = _post(client)
+    assert resp.status_code == 429
+    assert resp.headers["X-RateLimit-Limit"] == "0"
+
+
+def test_rate_limit_override_fails_open_on_redis_error(client, upstream, monkeypatch):
+    """A broken Redis for the rate-limit *lookup* must still let the
+    request through at the global default -- the same fail-open
+    posture every other V1Store method takes on a Redis error."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 100)
+
+    class BrokenGetRedis:
+        async def get(self, key):
+            raise ConnectionError("redis down")
+
+        async def incr(self, key):
+            return 1
+
+        async def expire(self, key, ttl):
+            return True
+
+    with patch.object(v1.store, "redis", BrokenGetRedis()), \
+         patch.object(v1.store, "usage_redis", BrokenGetRedis()), \
+         patch.object(v1.store, "outbox", Outbox(":memory:")):
+        resp = _post(client)
+
+    assert resp.status_code == 200
+    assert resp.headers["X-RateLimit-Limit"] == "100"
+
+
 def test_quota_exhausted_returns_402_without_calling_upstream(client, redis, upstream):
     redis.kv["gateway:v1:quota:42:literature.answer"] = 0
     resp = _post(client, idem="q-1")
@@ -509,6 +568,17 @@ def test_store_edge_cases(tmp_path):
     store.redis.kv.pop(key)
     store.redis.set = AsyncMock(return_value=None)
     assert asyncio.run(store.idempotency_begin("s", "k", "f")) == {"state": "in_progress"}
+
+
+def test_rate_limit_for_org_edge_cases(tmp_path):
+    import asyncio
+    with patch("app.services.v1_store.aioredis.from_url", return_value=FakeRedis()):
+        store = V1Store("redis://x", "redis://y", outbox_path=str(tmp_path / "outbox.db"))
+    assert asyncio.run(store.rate_limit_for_org("1")) is None  # no key set at all
+    store.redis.kv["gateway:v1:quota:1:ratelimit"] = "not-a-number"
+    assert asyncio.run(store.rate_limit_for_org("1")) is None
+    store.redis.kv["gateway:v1:quota:1:ratelimit"] = "30"
+    assert asyncio.run(store.rate_limit_for_org("1")) == 30
 
 
 def test_memory_store_semantics():

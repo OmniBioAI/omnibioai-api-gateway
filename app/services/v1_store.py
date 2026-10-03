@@ -122,6 +122,33 @@ class V1Store:
             return True, limit, reset
         return count <= limit, max(0, limit - count), reset
 
+    # ---------------- rate limit override (maintained by omnibioai-billing)
+    def _org_rate_limit_key(self, org_id: str) -> str:
+        # Nested under the same "quota:" prefix omnibioai-billing's
+        # gateway_quota_sync_service.py already writes allowance keys
+        # to -- deliberately not a new "ratelimit:" top-level prefix,
+        # so this reuses that service's existing Redis ACL grant
+        # (~gateway:v1:quota:*) exactly as-is. See that module's own
+        # docstring for the full reasoning.
+        return f"{_PREFIX}quota:{org_id}:ratelimit"
+
+    async def rate_limit_for_org(self, org_id: str) -> Optional[int]:
+        """The org's plan-specific requests-per-minute override, or
+        None when no plan override is set (every plan this platform
+        currently seeds leaves it unset -- a real number is a product
+        decision, not an engineering one) or on a Redis error. Callers
+        fall back to the configured global default in either case."""
+        try:
+            raw = await self.redis.get(self._org_rate_limit_key(org_id))
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
     # ---------------- quota (maintained by omnibioai-billing) -------------
     def _quota_key(self, org_id: str, resource: str) -> str:
         return f"{_PREFIX}quota:{org_id}:{resource}"
