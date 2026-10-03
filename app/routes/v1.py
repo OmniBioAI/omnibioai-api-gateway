@@ -61,8 +61,14 @@ def _caller(request: Request) -> tuple[str, str, str]:
     return subject, org_id, user_id
 
 
-async def _rate_limited(request: Request, subject: str, request_id: str):
-    limit = Config.V1_RATE_LIMIT_PER_MINUTE
+async def _rate_limited(request: Request, subject: str, org_id: str, request_id: str):
+    """limit is the caller's organization's plan-specific override
+    (published by omnibioai-billing's gateway_quota_sync_service.py)
+    when one is set, falling back to the configured global default --
+    `is not None`, not `or`, since a plan-specific limit of exactly 0
+    is a real (if unusual) value, not "unset"."""
+    org_limit = await store.rate_limit_for_org(org_id) if org_id else None
+    limit = org_limit if org_limit is not None else Config.V1_RATE_LIMIT_PER_MINUTE
     allowed, remaining, reset = await store.hit_rate_limit(subject, limit)
     headers = {
         "X-RateLimit-Limit": str(limit),
@@ -124,7 +130,7 @@ async def _handle_billable_literature_call(
     except UnsupportedRequestError as exc:
         return _error(400, "unsupported_request", exc.message, request_id, detail={"field": exc.field})
 
-    headers, limited = await _rate_limited(request, subject, request_id)
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
     if limited:
         return limited
 
@@ -226,8 +232,8 @@ async def literature_studies(request: Request):
     """Free: the queryable studies/domains, from omnibioai-rag GET /v1/studies.
     Rate-limited like every /v1 call, never billed."""
     request_id = getattr(request.state, "trace_id", "")
-    subject, _, _ = _caller(request)
-    headers, limited = await _rate_limited(request, subject, request_id)
+    subject, org_id, _ = _caller(request)
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
     if limited:
         return limited
     status, response = await _forward(request, "GET", "v1/studies")
@@ -245,8 +251,8 @@ async def literature_domains(request: Request):
     call, reshaped to the public contract. Rate-limited like every /v1
     call, never billed."""
     request_id = getattr(request.state, "trace_id", "")
-    subject, _, _ = _caller(request)
-    headers, limited = await _rate_limited(request, subject, request_id)
+    subject, org_id, _ = _caller(request)
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
     if limited:
         return limited
     status, response = await _forward(request, "GET", "v1/studies")
@@ -282,7 +288,7 @@ async def literature_usage(request: Request):
         return _error(403, "organization_required",
                       "This API is billed to an organization; your account has none.", request_id)
 
-    headers, limited = await _rate_limited(request, subject, request_id)
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
     if limited:
         return limited
 
@@ -333,8 +339,8 @@ async def literature_models(request: Request):
     passes back as this endpoint's own `model` request field).
     """
     request_id = getattr(request.state, "trace_id", "")
-    subject, _, _ = _caller(request)
-    headers, limited = await _rate_limited(request, subject, request_id)
+    subject, org_id, _ = _caller(request)
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
     if limited:
         return limited
     models = [
