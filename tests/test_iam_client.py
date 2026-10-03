@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.core.config import Config
 from app.services.iam_client import IAMClient, _sign_cache_entry
 
 
@@ -549,7 +548,9 @@ class TestCacheIntegrity:
         a cache miss, not a trusted identity, and evicted so a second,
         cheaper read can't accidentally trust it either."""
         client, fake_redis, _ = signed_cache_client
-        forged = json.dumps({"user_id": "attacker", "org_id": "any-org", "roles": ["admin"], "permissions": ["write"], "valid": True})
+        forged = json.dumps({
+            "user_id": "attacker", "org_id": "any-org", "roles": ["admin"], "permissions": ["write"], "valid": True,
+        })
         await fake_redis.setex("gateway:iam:forged-token", 60, forged)
         assert await client._get_cached("forged-token") is None
         assert "gateway:iam:forged-token" not in fake_redis.store
@@ -604,7 +605,9 @@ class TestCacheIntegrity:
         roles/org_id/user_id in the forged entry must never become the
         value validate() returns."""
         client, fake_redis, mock_http = signed_cache_client
-        forged = json.dumps({"user_id": "attacker", "org_id": "any-org", "roles": ["superadmin"], "permissions": ["*"], "valid": True})
+        forged = json.dumps({
+            "user_id": "attacker", "org_id": "any-org", "roles": ["superadmin"], "permissions": ["*"], "valid": True,
+        })
         await fake_redis.setex("gateway:iam:forged-token", 60, forged)
 
         resp = MagicMock()

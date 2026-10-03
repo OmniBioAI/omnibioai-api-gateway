@@ -9,7 +9,7 @@ Denial → 403 {"error": "HPC quota exceeded", "reason": ...}.
 Developer:
     Manish Kumar <manish@omnibioai.org>
 """
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
