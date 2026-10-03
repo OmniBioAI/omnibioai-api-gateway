@@ -222,6 +222,54 @@ def test_rate_limit(client, redis, upstream, monkeypatch):
     assert len(_usage(redis)) == 2
 
 
+def test_rate_limit_is_shared_across_multiple_keys_in_the_same_organization(client, redis, upstream, monkeypatch):
+    """Design audit gap #7: rate limiting must be enforced both per key
+    and per organization. Two different API keys belonging to the same
+    organization must share one organization-wide budget -- a key that
+    has made zero requests of its own must still be blocked once the
+    organization's shared budget is exhausted by a *different* key."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 2)
+    user_key_b = {**USER, "api_key_id": 8}
+
+    assert _post(client).status_code == 200
+    assert _post(client).status_code == 200  # key A alone has now used the org's shared budget of 2
+
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=user_key_b)):
+        third = _post(client)  # key B, same org, zero requests of its own
+    assert third.status_code == 429
+    assert third.json()["error"]["type"] == "rate_limit_exceeded"
+
+
+def test_rate_limit_per_key_budget_is_independent_across_organizations(client, redis, upstream, monkeypatch):
+    """The organization-wide counter must not leak across organizations
+    -- exhausting org 42's shared budget must not affect a key
+    belonging to a different organization."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 1)
+    other_org_user = {**USER, "org_id": "99", "api_key_id": 9}
+
+    assert _post(client).status_code == 200  # org 42 exhausts its budget of 1
+    assert _post(client).status_code == 429
+
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=other_org_user)):
+        resp = _post(client)  # a different organization entirely
+    assert resp.status_code == 200
+
+
+def test_rate_limit_headers_report_whichever_counter_is_binding(client, redis, upstream, monkeypatch):
+    """A key that has made no requests of its own, blocked purely by its
+    organization's exhausted shared budget, must see 0 remaining -- not
+    its own, still-fresh per-key count."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 1)
+    user_key_b = {**USER, "api_key_id": 8}
+
+    assert _post(client).status_code == 200  # key A exhausts the org's shared budget of 1
+
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=user_key_b)):
+        resp = _post(client)
+    assert resp.status_code == 429
+    assert resp.headers["X-RateLimit-Remaining"] == "0"
+
+
 def test_rate_limit_uses_the_organizations_plan_specific_override(client, redis, upstream, monkeypatch):
     """omnibioai-billing publishes this org's plan-specific override
     under gateway:v1:quota:{org}:ratelimit (see
