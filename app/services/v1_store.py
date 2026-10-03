@@ -140,13 +140,52 @@ class V1Store:
         except ValueError:
             return None
 
-    async def consume_quota(self, org_id: str, resource: str) -> None:
-        """Decrement an existing quota after a billed success. Never creates
-        the key: an org without a quota stays unmetered here."""
+    async def reserve_quota(self, org_id: str, resource: str) -> bool:
+        """Atomically reserve one unit of `resource` for `org_id` before
+        doing the work it would bill for, and report whether the
+        reservation succeeded. Replaces the old quota_remaining()-then-
+        later-consume_quota() pair, which read the counter, did the
+        (slow) upstream call, and only decremented afterward -- any
+        number of concurrent requests could all observe "1 remaining"
+        before any of them decremented, and all of them would then
+        succeed, overrunning the quota by however many were in flight
+        at once. Redis's DECR is atomic, so only as many concurrent
+        reservations as there are units left can ever observe a
+        non-negative result here; the rest observe negative and
+        compensate back to zero immediately (never below zero, and
+        never creating a key that did not already exist -- an org
+        without a quota key stays unmetered, exactly like before).
+
+        Fails open (reservation succeeds) on a Redis error, the same
+        posture every other method in this class takes: an outage must
+        never block a paid request, only leave this particular overrun
+        protection briefly unenforced until Redis recovers.
+        """
+        key = self._quota_key(org_id, resource)
+        try:
+            if await self.redis.get(key) is None:
+                return True  # unmetered: no quota key set for this org/resource
+            value = await self.redis.decr(key)
+        except Exception:
+            return True
+        if value < 0:
+            try:
+                await self.redis.incr(key)
+            except Exception:
+                pass
+            return False
+        return True
+
+    async def release_quota(self, org_id: str, resource: str) -> None:
+        """Refund a reservation made by reserve_quota() for a call that was
+        then not actually billable (the upstream request failed) -- the
+        reservation already decremented optimistically, before knowing
+        whether the call would succeed. Never creates the key: mirrors
+        reserve_quota's own "only adjust an existing counter" rule."""
         key = self._quota_key(org_id, resource)
         try:
             if await self.redis.get(key) is not None:
-                await self.redis.decr(key)
+                await self.redis.incr(key)
         except Exception:
             pass
 
