@@ -60,20 +60,47 @@ def test_no_model_override_variants_are_accepted(model):
     build_rag_query({"question": "q", "model": model})  # must not raise
 
 
-def test_model_override_is_rejected():
+def test_unsupported_model_override_is_rejected():
     with pytest.raises(UnsupportedRequestError) as exc:
-        build_rag_query({"question": "q", "model": "claude"})
+        build_rag_query({"question": "q", "model": "llama-4"})
     assert exc.value.field == "model"
-
-
-def test_use_own_key_is_rejected():
-    with pytest.raises(UnsupportedRequestError) as exc:
-        build_rag_query({"question": "q", "use_own_key": True})
-    assert exc.value.field == "use_own_key"
 
 
 def test_use_own_key_false_is_accepted():
     build_rag_query({"question": "q", "use_own_key": False})  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# M16 (design audit gap #4): BYOK model routing -- claude/openai require
+# use_own_key: true together, since there is no platform-wide key for
+# either provider.
+# ---------------------------------------------------------------------------
+
+
+def test_use_own_key_alone_without_a_byok_model_is_rejected():
+    with pytest.raises(UnsupportedRequestError) as exc:
+        build_rag_query({"question": "q", "use_own_key": True})
+    assert exc.value.field == "model"
+
+
+@pytest.mark.parametrize("model", ["claude", "openai"])
+def test_byok_model_without_use_own_key_is_rejected(model):
+    with pytest.raises(UnsupportedRequestError) as exc:
+        build_rag_query({"question": "q", "model": model})
+    assert exc.value.field == "use_own_key"
+
+
+@pytest.mark.parametrize("model", ["claude", "openai"])
+def test_byok_model_with_use_own_key_is_accepted_and_passed_through(model):
+    query = build_rag_query({"question": "q", "model": model, "use_own_key": True})
+    assert query["model"] == model
+
+
+def test_default_model_request_has_no_model_key_in_rag_query():
+    """The non-BYOK path's RAG body is unchanged from before M16 --
+    no "model" key at all, not even None."""
+    query = build_rag_query({"question": "q"})
+    assert "model" not in query
 
 
 def test_stream_is_rejected():
@@ -105,6 +132,24 @@ def test_builds_full_public_shape_from_rag_result():
             "billed_by": "query", "latency_ms": 42,
         },
     }
+
+
+def test_byok_summary_fields_flow_through_to_the_public_response():
+    """M16: a BYOK-routed RAG result's model_source/input_tokens/
+    output_tokens are relayed as-is, not overridden by the pre-M16
+    hardcoded defaults."""
+    rag_result = {
+        "study": "Oncology",
+        "summary": {
+            "text": "TP53 is a tumor suppressor.", "model": "claude-3-5-sonnet-20241022",
+            "model_source": "claude", "input_tokens": 120, "output_tokens": 15,
+        },
+        "documents": [],
+    }
+    answer = build_public_answer(rag_result, domain="Oncology", request_id="req-1", latency_ms=42)
+    assert answer["model_source"] == "claude"
+    assert answer["usage"]["input_tokens"] == 120
+    assert answer["usage"]["output_tokens"] == 15
 
 
 def test_falls_back_to_similarity_score_when_citation_confidence_absent():

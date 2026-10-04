@@ -29,15 +29,28 @@ class UnsupportedRequestError(Exception):
 
 # The only two spellings "no model override" takes today: the field is
 # absent/None, or the caller explicitly names RAG's actual current
-# default via this sentinel-free "default" shorthand. Any other value
-# is a model this gateway has no route for yet.
+# default via this sentinel-free "default" shorthand.
 _NO_MODEL_OVERRIDE = (None, "", "default")
+
+# M16 (design audit gap #4): the only two models BYOK routing can select
+# -- there is no platform-wide Claude/OpenAI key, only an organization's
+# own (see app/routes/v1.py's reveal-and-forward step), so either of
+# these requires use_own_key: true. Any other non-default value is a
+# model this gateway still has no route for at all.
+_BYOK_MODELS = ("claude", "openai")
 
 
 def build_rag_query(body: dict) -> dict:
     """Translate a public /v1/literature/answers request body into RAG's
     POST /v1/query body. Raises UnsupportedRequestError for a field this
-    gateway cannot yet honor."""
+    gateway cannot yet honor.
+
+    model="claude"/"openai" with use_own_key=true passes `model` through
+    to RAG's own body (see QueryRequest in omnibioai-rag's
+    app/api/server.py) -- app/routes/v1.py is what actually resolves and
+    attaches the organization's decrypted key before forwarding; this
+    function only validates the request shape, never touches a key.
+    """
     if not isinstance(body, dict):
         raise UnsupportedRequestError("body", "Request body must be a JSON object.")
 
@@ -45,16 +58,27 @@ def build_rag_query(body: dict) -> dict:
     if not isinstance(question, str) or not question.strip():
         raise UnsupportedRequestError("question", "\"question\" is required and must be a non-empty string.")
 
-    if body.get("model") not in _NO_MODEL_OVERRIDE:
+    model = body.get("model")
+    use_own_key = bool(body.get("use_own_key"))
+    if model not in _NO_MODEL_OVERRIDE and model not in _BYOK_MODELS:
         raise UnsupportedRequestError(
-            "model", f"Model {body.get('model')!r} is not yet supported; omit this field to use the default model.",
+            "model", f"Model {model!r} is not yet supported; omit this field to use the default model.",
         )
-    if body.get("use_own_key"):
-        raise UnsupportedRequestError("use_own_key", "Bring-your-own-key is not yet supported.")
+    if model in _BYOK_MODELS and not use_own_key:
+        raise UnsupportedRequestError(
+            "use_own_key",
+            f"Routing to {model!r} requires use_own_key: true -- there is no platform-wide key for this provider.",
+        )
+    if use_own_key and model not in _BYOK_MODELS:
+        raise UnsupportedRequestError(
+            "model", "use_own_key: true requires model to be \"claude\" or \"openai\".",
+        )
     if body.get("stream"):
         raise UnsupportedRequestError("stream", "Streaming responses are not yet supported.")
 
     query: dict = {"query": question, "study": body.get("domain") or "default"}
+    if model in _BYOK_MODELS:
+        query["model"] = model
     max_citations = body.get("max_citations")
     if isinstance(max_citations, (int, float)) and not isinstance(max_citations, bool) and max_citations > 0:
         query["top_k"] = int(max_citations)
@@ -136,20 +160,22 @@ def build_public_answer(rag_result: dict, *, domain, request_id: str, latency_ms
         "answer": summary.get("text", ""),
         "citations": citations,
         "model": summary.get("model"),
-        # Only one model source exists today -- RAG's own GPU-hosted
-        # model. Claude/OpenAI routing and BYOK (design "largest gaps"
-        # #4) would each need their own model_source value; until they
-        # exist, build_rag_query above already rejects any request that
-        # would need one.
-        "model_source": "omnibioai_gpu",
+        # M16: "omnibioai_gpu" when RAG used its own default model,
+        # "claude"/"openai" when this call was BYOK-routed -- RAG's own
+        # summary.model_source already reflects which one actually
+        # happened (see that repo's resolve_chat_model), so this just
+        # relays it rather than hardcoding the pre-M16 default.
+        "model_source": summary.get("model_source", "omnibioai_gpu"),
         "domain": rag_result.get("study", domain),
         "usage": {
             "queries": 1,
-            # No per-provider token accounting exists yet (same gap #4)
-            # -- reporting a fabricated count here would be worse than
+            # M16: real counts for a BYOK-routed call (RAG's own
+            # provider client reports them); still None for the default
+            # path, since Ollama's own response carries no token count
+            # at all -- reporting a fabricated one would be worse than
             # omitting it.
-            "input_tokens": None,
-            "output_tokens": None,
+            "input_tokens": summary.get("input_tokens"),
+            "output_tokens": summary.get("output_tokens"),
             "billed_by": "query",
             "latency_ms": latency_ms,
         },

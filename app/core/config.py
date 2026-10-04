@@ -32,6 +32,13 @@ class Config:
     # Upper bound on how long one exchange is reused; the minted token's
     # own expiry (minus a safety margin) caps it further.
     API_KEY_CACHE_TTL = int(os.getenv("API_KEY_CACHE_TTL", "60"))
+    # M16 (BYOK provider routing, design audit gap #4): same shared-
+    # secret shape as API_KEY_EXCHANGE_SECRET above, for omnibioai-auth's
+    # POST /internal/organizations/{id}/provider-keys/{provider}/reveal
+    # -- called immediately before a BYOK-routed /v1/literature/answers
+    # call is forwarded to RAG. Empty = BYOK routing rejected (503), not
+    # a silent fallback to the platform's own model.
+    PROVIDER_KEY_REVEAL_SECRET = os.getenv("PROVIDER_KEY_REVEAL_SECRET", "")
 
     # Public /v1 API (app/routes/v1.py). Rate-limit, idempotency and quota
     # state lives under gateway:v1:* in the Redis at V1_REDIS_URL, which
