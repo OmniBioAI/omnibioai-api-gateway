@@ -110,6 +110,25 @@ def test_exchange_success_builds_identity_and_caches_by_hash(iam, exchange_secre
     http.post.assert_not_called()
 
 
+def test_exchange_propagates_test_mode_true(iam, exchange_secret):
+    """M13: an omni_sk_test_ key's exchange response carries test_mode --
+    AuthMiddleware reads it off this dict to build request.state.identity."""
+    client, redis, http = iam
+    http.post.return_value = _response(200, {**EXCHANGE, "test_mode": True})
+    user = asyncio.run(client.validate_api_key(KEY))
+    assert user["test_mode"] is True
+
+
+def test_exchange_defaults_test_mode_false_when_absent(iam, exchange_secret):
+    """A pre-M13 omnibioai-auth deployment's exchange response has no
+    test_mode field at all -- must default closed (not test mode), not
+    raise a KeyError."""
+    client, redis, http = iam
+    http.post.return_value = _response(200, EXCHANGE)
+    user = asyncio.run(client.validate_api_key(KEY))
+    assert user["test_mode"] is False
+
+
 def test_cache_ttl_never_outlives_minted_token(iam, exchange_secret):
     client, redis, http = iam
     http.post.return_value = _response(200, {**EXCHANGE, "expires_in": 20})

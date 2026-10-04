@@ -333,6 +333,11 @@ class IAMClient:
                     "token_type": "api_key",
                     "api_key_id": data["api_key_id"],
                     "access_token": data["access_token"],
+                    # M13 (design audit gap #9): an omni_sk_test_ key --
+                    # AuthMiddleware copies this onto request.state.identity,
+                    # and app/routes/v1.py reads it there to serve a canned,
+                    # unbilled response instead of forwarding to RAG.
+                    "test_mode": bool(data.get("test_mode", False)),
                 }
                 ttl = min(Config.API_KEY_CACHE_TTL, int(data.get("expires_in", 0)) - 30)
                 await self._set_cached_api_key(key_hash, user, ttl)

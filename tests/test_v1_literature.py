@@ -434,6 +434,81 @@ def test_literature_search_has_no_concurrency_cap(client, redis, upstream, monke
     assert resp.status_code == 200
 
 
+# ---------------------------------------------------------------------------
+# omni_sk_test_ keys: canned, unbilled responses (design audit gap #9's
+# remaining "test keys and canned, unbilled responses are absent" bullet)
+# ---------------------------------------------------------------------------
+
+TEST_MODE_USER = {**USER, "test_mode": True}
+
+
+def test_test_mode_answers_returns_a_canned_response_without_calling_upstream(client, redis, upstream):
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=TEST_MODE_USER)):
+        resp = _post(client)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"].startswith("ans_test_")
+    assert body["model"] == "test" and body["model_source"] == "test"
+    assert body["citations"] == []
+    assert body["usage"]["queries"] == 0
+    upstream.assert_not_called()
+    assert _usage(redis) == []  # never billed
+
+
+def test_test_mode_search_returns_a_canned_response_without_calling_upstream(client, redis, upstream):
+    headers = {"Authorization": f"Bearer {KEY}"}
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=TEST_MODE_USER)):
+        resp = client.post("/v1/literature/search", json={"question": "q"}, headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"].startswith("srch_test_")
+    assert body["results"] == []
+    assert body["usage"]["searches"] == 0
+    upstream.assert_not_called()
+    assert _usage(redis) == []
+
+
+def test_test_mode_key_does_not_consume_quota(client, redis, upstream):
+    """A test key answers successfully even when the organization's real
+    quota is already exhausted -- test mode never checks it at all."""
+    redis.kv["gateway:v1:quota:42:literature.answer"] = 0
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=TEST_MODE_USER)):
+        resp = _post(client)
+    assert resp.status_code == 200
+
+
+def test_test_mode_key_is_still_rate_limited(client, redis, upstream, monkeypatch):
+    """Test mode skips quota/billing/RAG, but not rate limiting -- the
+    gateway's own resources still need abuse protection regardless of
+    whether a call is "real"."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 1)
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=TEST_MODE_USER)):
+        assert _post(client).status_code == 200
+        assert _post(client).status_code == 429
+
+
+def test_test_mode_key_does_not_acquire_a_concurrency_slot(client, redis, upstream, monkeypatch):
+    """A test key never calls RAG, so it must not compete for -- or even
+    touch -- the real concurrency budget shared with live callers."""
+    monkeypatch.setattr(Config, "V1_MAX_CONCURRENT_ANSWERS", 1)
+    redis.kv["gateway:v1:conc:api_key:7"] = 1  # already at the cap for a real call
+
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=TEST_MODE_USER)):
+        resp = _post(client, idem="test-conc-1")
+    assert resp.status_code == 200
+    assert redis.kv["gateway:v1:conc:api_key:7"] == 1  # untouched
+
+
+def test_test_mode_key_supports_idempotency_replay(client, redis, upstream):
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=TEST_MODE_USER)):
+        first = _post(client, idem="test-idem-1")
+        second = _post(client, idem="test-idem-1")
+    assert first.status_code == 200 and second.status_code == 200
+    assert second.headers.get("Idempotent-Replayed") == "true"
+    assert first.json() == second.json()
+    upstream.assert_not_called()
+
+
 def test_quota_exhausted_returns_402_without_calling_upstream(client, redis, upstream):
     redis.kv["gateway:v1:quota:42:literature.answer"] = 0
     resp = _post(client, idem="q-1")
