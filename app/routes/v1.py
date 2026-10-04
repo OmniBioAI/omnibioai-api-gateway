@@ -5,7 +5,9 @@ router is the stable, billable contract external developers integrate
 against. On top of the middleware chain (auth incl. omni_sk_ API keys,
 policy, audit) every /v1 call gets:
 
-- a per-caller rate limit (X-RateLimit-* headers, 429 + Retry-After),
+- a rate limit enforced both per caller and per organization (X-RateLimit-*
+  headers, 429 + Retry-After) -- an organization can't multiply its
+  effective limit by spreading requests across several API keys,
 - an org-level quota check maintained by omnibioai-billing (402),
 - optional Idempotency-Key replay, so a retried request is never run or
   billed twice,
@@ -66,10 +68,34 @@ async def _rate_limited(request: Request, subject: str, org_id: str, request_id:
     (published by omnibioai-billing's gateway_quota_sync_service.py)
     when one is set, falling back to the configured global default --
     `is not None`, not `or`, since a plan-specific limit of exactly 0
-    is a real (if unusual) value, not "unset"."""
+    is a real (if unusual) value, not "unset".
+
+    Enforced both per caller (subject -- an API key or a user session)
+    and per organization (design audit gap #7: "it is enforced per
+    caller/key, not both per key and per organisation") -- without the
+    organization-wide counter, an organization holding N API keys could
+    spread requests across them to multiply its effective limit by N,
+    since each key previously got its own independent budget. Both
+    counters share the same limit value; the request is rejected if
+    either is exhausted, and the headers report whichever one is
+    actually binding (the smaller remaining count) so the caller can
+    tell which budget they're hitting.
+    """
     org_limit = await store.rate_limit_for_org(org_id) if org_id else None
     limit = org_limit if org_limit is not None else Config.V1_RATE_LIMIT_PER_MINUTE
-    allowed, remaining, reset = await store.hit_rate_limit(subject, limit)
+
+    key_allowed, key_remaining, key_reset = await store.hit_rate_limit(subject, limit)
+    if org_id:
+        org_allowed, org_remaining, org_reset = await store.hit_rate_limit(f"org:{org_id}", limit)
+    else:
+        # No organization on this identity at all -- shouldn't normally
+        # happen for an authenticated /v1 caller, but fails open here
+        # (only the per-key check applies) rather than crashing on it.
+        org_allowed, org_remaining, org_reset = True, key_remaining, key_reset
+
+    allowed = key_allowed and org_allowed
+    remaining, reset = (org_remaining, org_reset) if org_remaining <= key_remaining else (key_remaining, key_reset)
+
     headers = {
         "X-RateLimit-Limit": str(limit),
         "X-RateLimit-Remaining": str(remaining),
