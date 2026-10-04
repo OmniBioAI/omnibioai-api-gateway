@@ -154,3 +154,45 @@ def build_public_answer(rag_result: dict, *, domain, request_id: str, latency_ms
             "latency_ms": latency_ms,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# M13 (design audit gap #9): omni_sk_test_ keys get a canned, deterministic
+# response in the exact shape build_public_answer/build_public_search
+# produce -- never a real RAG call, never a real citation, never counted
+# against quota or billed. Empty citations/results rather than fabricated
+# literature data: a test key's whole point is exercising a caller's own
+# integration code (idempotency handling, response parsing, error paths),
+# not pretending to answer a real biomedical question.
+# ---------------------------------------------------------------------------
+
+
+def build_test_answer(*, domain, request_id: str, latency_ms: int) -> dict:
+    return {
+        "id": f"ans_test_{request_id or uuid.uuid4().hex}",
+        "answer": "This is a canned test-mode response. No literature service was called, "
+                  "and this request was not billed.",
+        "citations": [],
+        "model": "test",
+        "model_source": "test",
+        "domain": domain or "default",
+        "usage": {
+            "queries": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "billed_by": "query",
+            "latency_ms": latency_ms,
+        },
+    }
+
+
+def build_test_search(*, domain, request_id: str, latency_ms: int) -> dict:
+    return {
+        "id": f"srch_test_{request_id or uuid.uuid4().hex}",
+        "results": [],
+        "domain": domain or "default",
+        "usage": {
+            "searches": 0,
+            "latency_ms": latency_ms,
+        },
+    }

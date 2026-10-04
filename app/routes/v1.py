@@ -16,7 +16,9 @@ policy, audit) every /v1 call gets:
 - an org-level quota check maintained by omnibioai-billing (402),
 - optional Idempotency-Key replay, so a retried request is never run or
   billed twice,
-- exactly one billable usage event per successful billable call,
+- exactly one billable usage event per successful billable call -- except
+  for an omni_sk_test_ key, which gets a canned response instead, never
+  counted against quota or billed,
 - one error shape: {"error": {"type", "message", "request_id"}}.
 
 Request and response bodies of /v1/literature/answers are the frozen
@@ -40,6 +42,8 @@ from app.services.literature_contract import (
     build_public_search,
     build_rag_query,
     build_rag_search_query,
+    build_test_answer,
+    build_test_search,
 )
 from app.services.v1_store import V1Store, request_fingerprint
 
@@ -154,8 +158,8 @@ def _upstream_error(status: int, response, request_id: str, headers: dict):
 
 
 async def _handle_billable_literature_call(
-    request: Request, *, resource: str, build_rag_body, build_public_response, quota_exceeded_message: str,
-    max_concurrent_answers: int | None = None,
+    request: Request, *, resource: str, build_rag_body, build_public_response, build_test_response,
+    quota_exceeded_message: str, max_concurrent_answers: int | None = None,
 ):
     """Shared lifecycle for every billable /v1/literature/* call
     (currently /answers and /search): auth'd-org check, contract
@@ -165,9 +169,19 @@ async def _handle_billable_literature_call(
     their request/response, and their quota-exceeded wording -- every
     other step (in particular the idempotency/quota/usage sequencing)
     must stay identical between them, so it lives here once rather than
-    as two copies that could silently drift apart."""
+    as two copies that could silently drift apart.
+
+    An omni_sk_test_ key (identity.test_mode) short-circuits to
+    build_test_response's canned answer -- real rate limiting still
+    applies (abuse protection the gateway itself needs regardless of
+    whether a call is "real"), but quota, the concurrency cap, the real
+    RAG call, and usage emission are all skipped: a test key must never
+    consume real org quota, real RAG capacity, or be billed.
+    """
     request_id = getattr(request.state, "trace_id", "")
     subject, org_id, user_id = _caller(request)
+    identity = getattr(request.state, "identity", None) or {}
+    test_mode = bool(identity.get("test_mode"))
     if not org_id:
         return _error(403, "organization_required",
                       "This API is billed to an organization; your account has none.", request_id)
@@ -206,7 +220,12 @@ async def _handle_billable_literature_call(
             return _error(409, "idempotency_in_progress",
                           "A request with this Idempotency-Key is still running.", request_id, headers)
 
-    if max_concurrent_answers is not None:
+    # A test key never touches real RAG capacity, so it never needs (or
+    # holds) a concurrency slot -- acquiring one here, only to release it
+    # a few lines down having done no real work, would just be unearned
+    # contention against real callers sharing the same key/org budget.
+    acquire_concurrency = max_concurrent_answers is not None and not test_mode
+    if acquire_concurrency:
         if not await _acquire_concurrency_slots(org_id, subject, max_concurrent_answers):
             if idempotency_key is not None:
                 await store.idempotency_finish(subject, idempotency_key, fingerprint, 429, None)
@@ -217,6 +236,15 @@ async def _handle_billable_literature_call(
             )
 
     try:
+        if test_mode:
+            public_response = build_test_response(domain=body.get("domain"), request_id=request_id, latency_ms=0)
+            if idempotency_key is not None:
+                await store.idempotency_finish(subject, idempotency_key, fingerprint, 200, public_response)
+            # No reserve_quota, no RAG forward, no emit_usage: a test key
+            # consumes no real quota, calls no real upstream, and is never
+            # billed -- that is the entire point of test mode.
+            return JSONResponse(public_response, status_code=200, headers={**headers, "X-Request-Id": request_id})
+
         # Atomic reserve-before-work: decrements the quota counter now, not
         # after the upstream call succeeds, so concurrent requests can
         # never all observe "quota available" and all succeed (see
@@ -245,7 +273,6 @@ async def _handle_billable_literature_call(
         if idempotency_key is not None:
             await store.idempotency_finish(subject, idempotency_key, fingerprint, status, public_response)
 
-        identity = getattr(request.state, "identity", None) or {}
         await store.emit_usage(
             org_id=org_id,
             user_id=user_id,
@@ -265,7 +292,7 @@ async def _handle_billable_literature_call(
         # denial, an upstream error, or success) -- a slot held by a
         # request that's already finished answering must never count
         # against the next one.
-        if max_concurrent_answers is not None:
+        if acquire_concurrency:
             await _release_concurrency_slots(org_id, subject)
 
 
@@ -276,6 +303,7 @@ async def literature_answers(request: Request):
         resource=ANSWER_RESOURCE,
         build_rag_body=build_rag_query,
         build_public_response=build_public_answer,
+        build_test_response=build_test_answer,
         quota_exceeded_message="Your organization has used its included answers. "
                                 "Add a payment method or upgrade the plan.",
         max_concurrent_answers=Config.V1_MAX_CONCURRENT_ANSWERS,
@@ -293,6 +321,7 @@ async def literature_search(request: Request):
         resource=SEARCH_RESOURCE,
         build_rag_body=build_rag_search_query,
         build_public_response=build_public_search,
+        build_test_response=build_test_search,
         quota_exceeded_message="Your organization has used its included searches. "
                                 "Add a payment method or upgrade the plan.",
     )

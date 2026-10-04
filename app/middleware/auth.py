@@ -70,5 +70,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "client_id": f"api_key:{user['api_key_id']}" if api_key else None,
             "permissions": user.get("permissions", []),
             "token_type": "api_key" if api_key else "user",
+            # M13: only ever True for an api_key identity (test mode is a
+            # property of the omni_sk_ key itself, not a session).
+            "test_mode": bool(user.get("test_mode", False)) if api_key else False,
         }
         return await call_next(request)
