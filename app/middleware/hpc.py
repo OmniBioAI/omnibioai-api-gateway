@@ -5,6 +5,12 @@ from app.services.hpc_policy_client import HPCPolicyClient
 from app.services.audit_client import build_audit_event, fire_audit
 
 _SKIP_PATHS = {"/health", "/", "/version"}
+# M17: see app/middleware/auth.py's own _SKIP_PREFIXES comment. Already
+# true in effect here too -- "mcp" is not a registered HPC compute
+# service, so is_compute_service("mcp") already falls through to
+# call_next below -- but explicit, like the other two middlewares,
+# rather than relying on that incidentally being the case.
+_SKIP_PREFIXES = ("/mcp",)
 
 
 class HPCMiddleware(BaseHTTPMiddleware):
@@ -13,7 +19,7 @@ class HPCMiddleware(BaseHTTPMiddleware):
         self.hpc = hpc
 
     async def dispatch(self, request, call_next):
-        if request.url.path in _SKIP_PATHS:
+        if request.url.path in _SKIP_PATHS or request.url.path.startswith(_SKIP_PREFIXES):
             return await call_next(request)
 
         parts = request.url.path.strip("/").split("/")

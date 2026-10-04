@@ -40,6 +40,14 @@ class Config:
     # a silent fallback to the platform's own model.
     PROVIDER_KEY_REVEAL_SECRET = os.getenv("PROVIDER_KEY_REVEAL_SECRET", "")
 
+    # M17 (hosted MCP, design audit gap #10): the hosted /mcp endpoint's
+    # tool handlers call back into this gateway's own /v1/literature/*
+    # REST routes (see app/services/mcp_server.py) -- reusing their
+    # existing rate-limit/quota/idempotency/billing logic unchanged,
+    # rather than reimplementing it for a second transport. Loopback,
+    # not a path a browser or external client ever reaches directly.
+    SELF_BASE_URL = os.getenv("SELF_BASE_URL", "http://127.0.0.1:8080")
+
     # Public /v1 API (app/routes/v1.py). Rate-limit, idempotency and quota
     # state lives under gateway:v1:* in the Redis at V1_REDIS_URL, which
     # needs its own ACL user (incr/expire/get/set/del/decr on gateway:v1:*).
