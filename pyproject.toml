@@ -13,6 +13,7 @@ dependencies = [
     "redis[asyncio]",
     "pyjwt",
     "cryptography==43.0.3",
+    "mcp>=2.3.0,<3.0",
 
     # IAM Foundation gateway integration: app/services/iam_client.py uses
     # AsyncIAMClient for RS256/JWKS/HS256 token verification. Pinned direct

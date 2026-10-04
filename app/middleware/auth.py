@@ -10,6 +10,13 @@ from app.services.audit_client import build_audit_event, fire_audit
 # security-audit, and toolserver all expose their own /docs pages.
 # Every actual API call still goes through the token check below.
 _SKIP_PATHS = {"/health", "/", "/version", "/docs", "/openapi.json"}
+# M17: the mounted MCP Streamable HTTP app (app/services/mcp_server.py)
+# is a prefix, not one exact path, and gates itself -- see
+# app/services/mcp_auth.py's MCPBearerAuthASGIMiddleware, wrapping that
+# mount directly. Skipped here (and in PolicyMiddleware/HPCMiddleware)
+# so this request/response-oriented middleware never buffers or blocks
+# that app's own long-lived streaming session.
+_SKIP_PREFIXES = ("/mcp",)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -18,7 +25,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.iam = iam
 
     async def dispatch(self, request, call_next):
-        if request.url.path in _SKIP_PATHS:
+        if request.url.path in _SKIP_PATHS or request.url.path.startswith(_SKIP_PREFIXES):
             return await call_next(request)
 
         token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()

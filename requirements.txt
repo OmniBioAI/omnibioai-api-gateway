@@ -3,6 +3,9 @@ uvicorn
 httpx
 redis[asyncio]
 pyjwt
+# M17 (hosted MCP, design audit gap #10): the Streamable HTTP transport
+# mounted at /mcp (app/services/mcp_server.py).
+mcp>=2.3.0,<3.0
 # Keep the IAM client's transitive cryptography dependency on the validated
 # ARM64-compatible range; newer wheels use unsupported instructions here.
 cryptography==43.0.3

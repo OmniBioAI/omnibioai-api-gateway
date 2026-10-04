@@ -23,6 +23,10 @@ from app.services.audit_client import build_audit_event, fire_audit
 # an unmodeled synthetic path, not a real API-service route, so
 # exempting it doesn't touch actual API access control.
 _SKIP_PATHS = {"/health", "/", "/auth/verify", "/version", "/docs", "/openapi.json"}
+# M17: see app/middleware/auth.py's own _SKIP_PREFIXES comment -- the
+# mounted MCP app gates itself and must never be wrapped by this
+# request/response-oriented middleware.
+_SKIP_PREFIXES = ("/mcp",)
 
 
 class PolicyMiddleware(BaseHTTPMiddleware):
@@ -31,7 +35,7 @@ class PolicyMiddleware(BaseHTTPMiddleware):
         self.policy = policy
 
     async def dispatch(self, request, call_next):
-        if request.url.path in _SKIP_PATHS:
+        if request.url.path in _SKIP_PATHS or request.url.path.startswith(_SKIP_PREFIXES):
             return await call_next(request)
 
         user = getattr(request.state, "user", None)
