@@ -71,7 +71,7 @@ class TestToolHandlers:
         server = build_mcp_server()
         forward = AsyncMock(return_value=(200, {"answer": "TP53 is a tumor suppressor."}))
         with patch("app.services.mcp_server.proxy.forward", forward):
-            result = asyncio.run(server.call_tool("answer_with_citations", {"question": "What does TP53 do?"}))
+            asyncio.run(server.call_tool("answer_with_citations", {"question": "What does TP53 do?"}))
         kwargs = forward.call_args.kwargs
         assert kwargs["url"].endswith("/v1/literature/answers")
         assert kwargs["body"] == {"question": "What does TP53 do?", "domain": "default"}
