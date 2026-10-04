@@ -447,3 +447,92 @@ async def literature_models(request: Request):
         {"model": "default", "source": "omnibioai_gpu", "billed_by": "query", "price": None},
     ]
     return JSONResponse({"models": models}, status_code=200, headers={**headers, "X-Request-Id": request_id})
+
+
+# ---------------------------------------------------------------------------
+# M15 (design audit gap #4, first slice of BYOK): proxies into
+# omnibioai-auth's own PUT/GET/DELETE /orgs/{org_id}/provider-keys(/
+# {provider}) (M14's storage service) -- never implemented here, just
+# forwarded, the same pattern GET /v1/usage above already uses for
+# omnibioai-billing. Free (not a billable /v1/literature/* call); still
+# rate-limited like every other /v1 route.
+# ---------------------------------------------------------------------------
+
+
+def _provider_key_error(status: int, response, request_id: str, headers: dict):
+    if status >= 500:
+        return _error(502, "upstream_error",
+                      "The identity service failed to process this request.", request_id, headers)
+    if status == 403:
+        return _error(403, "forbidden",
+                       "You do not have permission to manage this organization's provider keys.",
+                       request_id, headers)
+    if status == 404:
+        return _error(404, "not_found", "No key is configured for that provider.", request_id, headers)
+    return _error(status, "invalid_request", "The identity service rejected the request.",
+                  request_id, headers, detail=response)
+
+
+@router.put("/provider-keys/{provider}")
+async def set_provider_key(request: Request, provider: str):
+    """Store this organization's own Claude/OpenAI key, encrypted at
+    rest by omnibioai-auth. Storage only -- nothing yet routes a real
+    /v1/literature/answers call through it (design audit gap #4's
+    remaining bullets)."""
+    request_id = getattr(request.state, "trace_id", "")
+    subject, org_id, _ = _caller(request)
+    if not org_id:
+        return _error(403, "organization_required",
+                      "This API is billed to an organization; your account has none.", request_id)
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "invalid_request", "Request body must be JSON.", request_id)
+
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
+    if limited:
+        return limited
+
+    status, response = await _forward_to("auth", request, "PUT", f"orgs/{org_id}/provider-keys/{provider}", body)
+    if not 200 <= status < 300:
+        return _provider_key_error(status, response, request_id, headers)
+    return JSONResponse(response, status_code=status, headers={**headers, "X-Request-Id": request_id})
+
+
+@router.get("/provider-keys")
+async def get_provider_key(request: Request):
+    """Whether (and which provider's) key is configured -- never the
+    key itself, the same write-only contract omnibioai-auth's own
+    endpoint already enforces."""
+    request_id = getattr(request.state, "trace_id", "")
+    subject, org_id, _ = _caller(request)
+    if not org_id:
+        return _error(403, "organization_required",
+                      "This API is billed to an organization; your account has none.", request_id)
+
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
+    if limited:
+        return limited
+
+    status, response = await _forward_to("auth", request, "GET", f"orgs/{org_id}/provider-keys")
+    if not 200 <= status < 300:
+        return _provider_key_error(status, response, request_id, headers)
+    return JSONResponse(response, status_code=status, headers={**headers, "X-Request-Id": request_id})
+
+
+@router.delete("/provider-keys/{provider}")
+async def delete_provider_key(request: Request, provider: str):
+    request_id = getattr(request.state, "trace_id", "")
+    subject, org_id, _ = _caller(request)
+    if not org_id:
+        return _error(403, "organization_required",
+                      "This API is billed to an organization; your account has none.", request_id)
+
+    headers, limited = await _rate_limited(request, subject, org_id, request_id)
+    if limited:
+        return limited
+
+    status, response = await _forward_to("auth", request, "DELETE", f"orgs/{org_id}/provider-keys/{provider}")
+    if not 200 <= status < 300:
+        return _provider_key_error(status, response, request_id, headers)
+    return JSONResponse(response, status_code=status, headers={**headers, "X-Request-Id": request_id})
