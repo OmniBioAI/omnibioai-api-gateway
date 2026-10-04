@@ -41,6 +41,30 @@ def test_config_reads_iam_url_from_env(monkeypatch):
     importlib.reload(cfg_module)
 
 
+def test_v1_idempotency_ttl_is_capped_at_30_days_even_if_configured_higher(monkeypatch):
+    """M18 (design audit gap #11): the idempotency-replay cache holds
+    the real answer text/citations, so its TTL is the de facto
+    enforcement of the 30-day deletion policy -- a misconfigured env
+    var must not be able to silently violate that."""
+    monkeypatch.setenv("V1_IDEMPOTENCY_TTL", str(60 * 24 * 60 * 60))  # 60 days
+    import app.core.config as cfg_module
+
+    importlib.reload(cfg_module)
+    assert cfg_module.Config.V1_IDEMPOTENCY_TTL == 30 * 24 * 60 * 60
+    monkeypatch.delenv("V1_IDEMPOTENCY_TTL", raising=False)
+    importlib.reload(cfg_module)
+
+
+def test_v1_idempotency_ttl_below_the_30_day_cap_is_unaffected(monkeypatch):
+    monkeypatch.setenv("V1_IDEMPOTENCY_TTL", "60")
+    import app.core.config as cfg_module
+
+    importlib.reload(cfg_module)
+    assert cfg_module.Config.V1_IDEMPOTENCY_TTL == 60
+    monkeypatch.delenv("V1_IDEMPOTENCY_TTL", raising=False)
+    importlib.reload(cfg_module)
+
+
 def test_config_defaults_are_set():
     """IAM_URL/REDIS_URL/JWT_SECRET all have non-empty defaults, so the
     gateway can start with no environment variables configured."""

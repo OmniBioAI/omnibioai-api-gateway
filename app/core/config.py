@@ -56,7 +56,15 @@ class Config:
     # omnibioai-billing are then not visible.
     V1_REDIS_URL = os.getenv("V1_REDIS_URL", "")
     V1_RATE_LIMIT_PER_MINUTE = int(os.getenv("V1_RATE_LIMIT_PER_MINUTE", "60"))
-    V1_IDEMPOTENCY_TTL = int(os.getenv("V1_IDEMPOTENCY_TTL", "86400"))
+    # M18 (design audit gap #11): this cached replay body is the real
+    # answer text/citations for /v1/literature/answers, not just
+    # metadata -- one of only two places that text survives anywhere in
+    # this system at all (the other is omnibioai-rag's own query
+    # cache). The design doc's 30-day question/answer deletion policy
+    # is enforced here as a hard ceiling on this already-short-lived
+    # cache's TTL, not a separate deletion job -- there is no durable
+    # store for one to run against.
+    V1_IDEMPOTENCY_TTL = min(int(os.getenv("V1_IDEMPOTENCY_TTL", "86400")), 30 * 24 * 60 * 60)
     # Design audit gap #7 ("concurrent-answer limits are absent"): the
     # most expensive /v1 call (it invokes an LLM, up to RAG's own
     # 300-second timeout) is capped on how many of a single key's or
