@@ -5,9 +5,14 @@ router is the stable, billable contract external developers integrate
 against. On top of the middleware chain (auth incl. omni_sk_ API keys,
 policy, audit) every /v1 call gets:
 
-- a rate limit enforced both per caller and per organization (X-RateLimit-*
-  headers, 429 + Retry-After) -- an organization can't multiply its
-  effective limit by spreading requests across several API keys,
+- a token-bucket rate limit enforced both per caller and per organization
+  (X-RateLimit-* headers, 429 + Retry-After) -- an organization can't
+  multiply its effective limit by spreading requests across several API
+  keys, and bursting a full minute's allowance at once no longer lets a
+  caller squeeze in double that across one window boundary,
+- a concurrency limit on in-flight /v1/literature/answers calls, per
+  caller and per organization (429, independent of the rate limit above,
+  which only bounds call frequency),
 - an org-level quota check maintained by omnibioai-billing (402),
 - optional Idempotency-Key replay, so a retried request is never run or
   billed twice,
@@ -109,6 +114,26 @@ async def _rate_limited(request: Request, subject: str, org_id: str, request_id:
     return headers, None
 
 
+async def _acquire_concurrency_slots(org_id: str, subject: str, limit: int) -> bool:
+    """Both the subject's and the organization's in-flight counters must
+    have a free slot for the duration of one /v1/literature/answers call
+    -- if the organization's is full, a key that's never made a request
+    of its own must still be blocked, the same per-key-and-per-org
+    pairing _rate_limited already enforces for request frequency."""
+    if not await store.acquire_concurrency_slot(subject, limit):
+        return False
+    if org_id and not await store.acquire_concurrency_slot(f"org:{org_id}", limit):
+        await store.release_concurrency_slot(subject)
+        return False
+    return True
+
+
+async def _release_concurrency_slots(org_id: str, subject: str) -> None:
+    await store.release_concurrency_slot(subject)
+    if org_id:
+        await store.release_concurrency_slot(f"org:{org_id}")
+
+
 async def _forward_to(service: str, request: Request, method: str, path: str, body=None):
     url = f"{resolve_service(service)}/{path}"
     if request.url.query:
@@ -130,6 +155,7 @@ def _upstream_error(status: int, response, request_id: str, headers: dict):
 
 async def _handle_billable_literature_call(
     request: Request, *, resource: str, build_rag_body, build_public_response, quota_exceeded_message: str,
+    max_concurrent_answers: int | None = None,
 ):
     """Shared lifecycle for every billable /v1/literature/* call
     (currently /answers and /search): auth'd-org check, contract
@@ -180,49 +206,67 @@ async def _handle_billable_literature_call(
             return _error(409, "idempotency_in_progress",
                           "A request with this Idempotency-Key is still running.", request_id, headers)
 
-    # Atomic reserve-before-work: decrements the quota counter now, not
-    # after the upstream call succeeds, so concurrent requests can never
-    # all observe "quota available" and all succeed (see
-    # V1Store.reserve_quota's own docstring for why the old check-then-
-    # later-decrement pair could overrun a near-zero quota).
-    if not await store.reserve_quota(org_id, resource):
+    if max_concurrent_answers is not None:
+        if not await _acquire_concurrency_slots(org_id, subject, max_concurrent_answers):
+            if idempotency_key is not None:
+                await store.idempotency_finish(subject, idempotency_key, fingerprint, 429, None)
+            return _error(
+                429, "concurrency_limit_exceeded",
+                f"More than {max_concurrent_answers} concurrent requests for this key or organization.",
+                request_id, headers,
+            )
+
+    try:
+        # Atomic reserve-before-work: decrements the quota counter now, not
+        # after the upstream call succeeds, so concurrent requests can
+        # never all observe "quota available" and all succeed (see
+        # V1Store.reserve_quota's own docstring for why the old check-
+        # then-later-decrement pair could overrun a near-zero quota).
+        if not await store.reserve_quota(org_id, resource):
+            if idempotency_key is not None:
+                await store.idempotency_finish(subject, idempotency_key, fingerprint, 402, None)
+            return _error(402, "quota_exceeded", quota_exceeded_message, request_id, headers)
+
+        started = time.monotonic()
+        status, response = await _forward(request, "POST", "v1/query", rag_body)
+        latency_ms = round((time.monotonic() - started) * 1000)
+
+        if not 200 <= status < 300:
+            # The reservation above assumed this call would succeed and be
+            # billed; it didn't, so the unit must be given back.
+            await store.release_quota(org_id, resource)
+            if idempotency_key is not None:
+                await store.idempotency_finish(subject, idempotency_key, fingerprint, status, response)
+            return _upstream_error(status, response, request_id, headers)
+
+        public_response = build_public_response(
+            response, domain=body.get("domain"), request_id=request_id, latency_ms=latency_ms,
+        )
         if idempotency_key is not None:
-            await store.idempotency_finish(subject, idempotency_key, fingerprint, 402, None)
-        return _error(402, "quota_exceeded", quota_exceeded_message, request_id, headers)
+            await store.idempotency_finish(subject, idempotency_key, fingerprint, status, public_response)
 
-    started = time.monotonic()
-    status, response = await _forward(request, "POST", "v1/query", rag_body)
-    latency_ms = round((time.monotonic() - started) * 1000)
-
-    if not 200 <= status < 300:
-        # The reservation above assumed this call would succeed and be
-        # billed; it didn't, so the unit must be given back.
-        await store.release_quota(org_id, resource)
-        if idempotency_key is not None:
-            await store.idempotency_finish(subject, idempotency_key, fingerprint, status, response)
-        return _upstream_error(status, response, request_id, headers)
-
-    public_response = build_public_response(
-        response, domain=body.get("domain"), request_id=request_id, latency_ms=latency_ms,
-    )
-    if idempotency_key is not None:
-        await store.idempotency_finish(subject, idempotency_key, fingerprint, status, public_response)
-
-    identity = getattr(request.state, "identity", None) or {}
-    await store.emit_usage(
-        org_id=org_id,
-        user_id=user_id,
-        resource=resource,
-        trace_id=request_id,
-        dedup_key=f"{subject}:{idempotency_key}" if idempotency_key else request_id,
-        metadata={
-            "request_id": request_id,
-            "client_id": identity.get("client_id"),
-            "token_type": identity.get("token_type"),
-            "idempotency_key_sha256": request_fingerprint(idempotency_key) if idempotency_key else None,
-        },
-    )
-    return JSONResponse(public_response, status_code=status, headers={**headers, "X-Request-Id": request_id})
+        identity = getattr(request.state, "identity", None) or {}
+        await store.emit_usage(
+            org_id=org_id,
+            user_id=user_id,
+            resource=resource,
+            trace_id=request_id,
+            dedup_key=f"{subject}:{idempotency_key}" if idempotency_key else request_id,
+            metadata={
+                "request_id": request_id,
+                "client_id": identity.get("client_id"),
+                "token_type": identity.get("token_type"),
+                "idempotency_key_sha256": request_fingerprint(idempotency_key) if idempotency_key else None,
+            },
+        )
+        return JSONResponse(public_response, status_code=status, headers={**headers, "X-Request-Id": request_id})
+    finally:
+        # Released regardless of how the try block above exited (a quota
+        # denial, an upstream error, or success) -- a slot held by a
+        # request that's already finished answering must never count
+        # against the next one.
+        if max_concurrent_answers is not None:
+            await _release_concurrency_slots(org_id, subject)
 
 
 @router.post("/literature/answers")
@@ -234,6 +278,7 @@ async def literature_answers(request: Request):
         build_public_response=build_public_answer,
         quota_exceeded_message="Your organization has used its included answers. "
                                 "Add a payment method or upgrade the plan.",
+        max_concurrent_answers=Config.V1_MAX_CONCURRENT_ANSWERS,
     )
 
 

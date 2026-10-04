@@ -6,6 +6,7 @@ logged in the response path rather than silently changing a decision.
 """
 import hashlib
 import json
+import math
 import time
 import uuid
 from datetime import datetime, timezone
@@ -106,21 +107,94 @@ class V1Store:
         self.usage_redis = aioredis.from_url(usage_redis_url, decode_responses=True)
         self.outbox = Outbox(outbox_path)
 
-    # ---------------- rate limit (fixed one-minute window) ----------------
+    # ---------------- rate limit (token bucket) ----------------------------
     async def hit_rate_limit(self, subject: str, limit: int) -> tuple[bool, int, int]:
-        """Count one request for `subject`. Returns (allowed, remaining,
-        seconds_until_reset). Fails open on Redis errors."""
-        now = int(time.time())
-        window = now // 60
-        reset = 60 - (now % 60)
-        key = f"{_PREFIX}rl:{subject}:{window}"
+        """Design audit gap #7 ("fixed one-minute window... rather than a
+        token bucket"): `limit` tokens refill continuously over 60 seconds
+        (rate = limit/60 tokens/sec), bucket capacity = limit -- a caller
+        can burst its full per-minute allowance at once, then it refills
+        smoothly, rather than the old fixed window's hard reset-at-:00
+        boundary, which let a caller spend its whole budget in the last
+        second of one window and again in the first second of the next:
+        up to 2x `limit` requests in under two seconds, never caught by a
+        window that only ever compares against *one* window's count at a
+        time. Returns (allowed, remaining, seconds_until_next_token) --
+        remaining is the floored token count after this request; the third
+        value is 0 whenever a request is allowed (another token is already
+        available right now) and otherwise how long until the bucket has
+        earned back at least one, used for X-RateLimit-Reset/Retry-After.
+
+        Not atomic against a concurrent request for the *same* subject on
+        a real Redis backend (a plain GET then SET, no Lua script) -- a
+        request landing in that window could read the same token count and
+        both deduct from it, each believing it got a distinct token. A
+        bounded, accepted imperfection (the practical cost is occasionally
+        allowing one extra request under true concurrent load for one
+        subject), not a new class of risk: nothing here is billing-
+        critical the way reserve_quota's own atomic DECR had to be. Fails
+        open on a Redis error, same posture as every other method here.
+        """
+        if limit <= 0:
+            return False, 0, 60
+        rate = limit / 60.0
+        now = time.time()
+        key = f"{_PREFIX}rltb:{subject}"
+        try:
+            raw = await self.redis.get(key)
+            if raw is None:
+                tokens, last = float(limit), now
+            else:
+                tokens, last = json.loads(raw)
+            tokens = min(float(limit), tokens + max(0.0, now - last) * rate)
+            allowed = tokens >= 1.0
+            if allowed:
+                tokens -= 1.0
+            await self.redis.set(key, json.dumps([tokens, now]), ex=120)
+        except Exception:
+            return True, limit, 0
+        reset = 0 if tokens >= 1.0 else max(1, math.ceil((1.0 - tokens) / rate))
+        return allowed, int(tokens), reset
+
+    # ---------------- concurrent-request limit ------------------------------
+    def _concurrency_key(self, subject: str) -> str:
+        return f"{_PREFIX}conc:{subject}"
+
+    async def acquire_concurrency_slot(self, subject: str, limit: int) -> bool:
+        """Design audit gap #7 ("concurrent-answer limits are absent"):
+        atomically increments the in-flight-request counter for `subject`
+        (an API key, a user session, or f"org:{org_id}") and reports
+        whether the new count is within `limit`. If not, immediately
+        decrements back out -- a caller denied a slot never holds one, so
+        it must call release_concurrency_slot only when this returns True
+        (the same reserve-then-release pairing reserve_quota/release_quota
+        already established for the billing quota counter). The TTL is a
+        safety net only, for the case a crash skips the matching release --
+        every normal request releases its own slot long before 300s.
+        Fails open (True) on a Redis error.
+        """
+        key = self._concurrency_key(subject)
         try:
             count = await self.redis.incr(key)
-            if count == 1:
-                await self.redis.expire(key, 61)
+            await self.redis.expire(key, 300)
         except Exception:
-            return True, limit, reset
-        return count <= limit, max(0, limit - count), reset
+            return True
+        if count > limit:
+            try:
+                await self.redis.decr(key)
+            except Exception:
+                pass
+            return False
+        return True
+
+    async def release_concurrency_slot(self, subject: str) -> None:
+        """Releases a slot acquired by acquire_concurrency_slot. Must only
+        be called for a subject that call actually returned True for --
+        calling it for a denied acquisition would double-release (the
+        denial already decremented back out itself)."""
+        try:
+            await self.redis.decr(self._concurrency_key(subject))
+        except Exception:
+            pass
 
     # ---------------- rate limit override (maintained by omnibioai-billing)
     def _org_rate_limit_key(self, org_id: str) -> str:

@@ -329,6 +329,111 @@ def test_rate_limit_override_fails_open_on_redis_error(client, upstream, monkeyp
     assert resp.headers["X-RateLimit-Limit"] == "100"
 
 
+def test_token_bucket_refills_a_token_after_the_rate_elapses(client, redis, upstream, monkeypatch):
+    """Design audit gap #7: the fixed one-minute window's hard reset at
+    :00 let a caller spend its whole budget in the last second of one
+    window and again in the first second of the next -- 2x limit in
+    under two seconds. A token bucket instead earns back one token at a
+    time, continuously: here, waiting exactly 1/rate seconds after
+    exhausting a limit-of-2 bucket earns back exactly one token, no
+    more."""
+    import app.services.v1_store as v1_store
+
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 2)
+    now = [1_000_000.0]
+    monkeypatch.setattr(v1_store.time, "time", lambda: now[0])
+
+    assert _post(client).status_code == 200
+    assert _post(client).status_code == 200
+    denied = _post(client)
+    assert denied.status_code == 429
+
+    rate = 2 / 60.0
+    now[0] += 1.0 / rate  # exactly enough time for one token to refill
+    allowed = _post(client)
+    assert allowed.status_code == 200
+    immediately_after = _post(client)
+    assert immediately_after.status_code == 429  # only one token refilled, not a full reset
+
+
+def test_rate_limit_of_zero_reports_a_fixed_reset_without_dividing_by_zero(client, redis, upstream, monkeypatch):
+    """limit=0 means rate=0 tokens/sec -- the reset-time computation must
+    not attempt to divide by that rate."""
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 100)
+    redis.kv["gateway:v1:quota:42:ratelimit"] = 0
+
+    resp = _post(client)
+    assert resp.status_code == 429
+    assert int(resp.headers["Retry-After"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Concurrent-answer limits (design audit gap #7's other remaining bullet)
+# ---------------------------------------------------------------------------
+
+
+def test_concurrency_limit_rejects_once_the_keys_slot_cap_is_reached(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "V1_MAX_CONCURRENT_ANSWERS", 2)
+    redis.kv["gateway:v1:conc:api_key:7"] = 2  # already at the cap
+
+    resp = _post(client, idem="conc-1")
+    assert resp.status_code == 429
+    assert resp.json()["error"]["type"] == "concurrency_limit_exceeded"
+    upstream.assert_not_called()
+    assert _usage(redis) == []
+    # The denied attempt must not have left the counter net-incremented.
+    assert redis.kv["gateway:v1:conc:api_key:7"] == 2
+
+
+def test_concurrency_limit_is_enforced_per_organization_too(client, redis, upstream, monkeypatch):
+    """A key with no in-flight calls of its own is still blocked once its
+    organization's shared concurrency budget is exhausted by other
+    keys -- the same per-key-and-per-org pairing the rate limiter uses."""
+    monkeypatch.setattr(Config, "V1_MAX_CONCURRENT_ANSWERS", 2)
+    redis.kv["gateway:v1:conc:org:42"] = 2  # org's shared budget already full
+    # This key's own counter is fresh (zero/absent).
+
+    resp = _post(client, idem="conc-2")
+    assert resp.status_code == 429
+    assert resp.json()["error"]["type"] == "concurrency_limit_exceeded"
+    # The key's own slot, acquired before the org check failed, must have
+    # been released back out rather than left incremented.
+    assert redis.kv.get("gateway:v1:conc:api_key:7", 0) == 0
+
+
+def test_concurrency_slot_is_released_after_a_successful_request(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "V1_MAX_CONCURRENT_ANSWERS", 5)
+    resp = _post(client)
+    assert resp.status_code == 200
+    assert redis.kv["gateway:v1:conc:api_key:7"] == 0
+    assert redis.kv["gateway:v1:conc:org:42"] == 0
+
+
+def test_concurrency_slot_is_released_after_a_quota_denial(client, redis, upstream, monkeypatch):
+    """The concurrency slot is acquired before the quota check -- a 402
+    must still release it, or a key that's merely out of quota would
+    also look permanently "busy" to the concurrency limiter."""
+    monkeypatch.setattr(Config, "V1_MAX_CONCURRENT_ANSWERS", 5)
+    redis.kv["gateway:v1:quota:42:literature.answer"] = 0
+
+    resp = _post(client, idem="conc-3")
+    assert resp.status_code == 402
+    assert redis.kv["gateway:v1:conc:api_key:7"] == 0
+    assert redis.kv["gateway:v1:conc:org:42"] == 0
+
+
+def test_literature_search_has_no_concurrency_cap(client, redis, upstream, monkeypatch):
+    """Design audit gap #7 names /v1/literature/answers specifically (the
+    expensive, LLM-invoking call) -- /search is retrieval-only and
+    carries no concurrency limit of its own."""
+    monkeypatch.setattr(Config, "V1_MAX_CONCURRENT_ANSWERS", 1)
+    redis.kv["gateway:v1:conc:api_key:7"] = 1_000_000  # would deny /answers outright
+
+    headers = {"Authorization": f"Bearer {KEY}"}
+    resp = client.post("/v1/literature/search", json={"question": "q"}, headers=headers)
+    assert resp.status_code == 200
+
+
 def test_quota_exhausted_returns_402_without_calling_upstream(client, redis, upstream):
     redis.kv["gateway:v1:quota:42:literature.answer"] = 0
     resp = _post(client, idem="q-1")

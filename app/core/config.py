@@ -42,6 +42,16 @@ class Config:
     V1_REDIS_URL = os.getenv("V1_REDIS_URL", "")
     V1_RATE_LIMIT_PER_MINUTE = int(os.getenv("V1_RATE_LIMIT_PER_MINUTE", "60"))
     V1_IDEMPOTENCY_TTL = int(os.getenv("V1_IDEMPOTENCY_TTL", "86400"))
+    # Design audit gap #7 ("concurrent-answer limits are absent"): the
+    # most expensive /v1 call (it invokes an LLM, up to RAG's own
+    # 300-second timeout) is capped on how many of a single key's or
+    # organization's calls may be in flight at once -- independent of,
+    # and enforced alongside, the per-minute rate limit above, which
+    # only bounds call *frequency*, not concurrency. A conservative
+    # operator-tunable default, not a per-plan number (no billing_plans
+    # column exists for this, unlike V1_RATE_LIMIT_PER_MINUTE's own
+    # plan-aware override -- this is overload protection, not pricing).
+    V1_MAX_CONCURRENT_ANSWERS = int(os.getenv("V1_MAX_CONCURRENT_ANSWERS", "5"))
     # Billable usage goes to the same usage:events stream every other
     # producer writes (omnibioai-usage-client wire format), consumed by
     # omnibioai-billing.
