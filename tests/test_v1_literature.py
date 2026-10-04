@@ -186,8 +186,8 @@ def test_rejects_missing_question(client, redis, upstream):
 
 
 @pytest.mark.parametrize("field,body", [
-    ("model", {"question": "q", "model": "claude"}),
-    ("use_own_key", {"question": "q", "use_own_key": True}),
+    ("model", {"question": "q", "model": "llama-4"}),
+    ("use_own_key", {"question": "q", "model": "claude"}),  # claude without use_own_key: true
     ("stream", {"question": "q", "stream": True}),
 ])
 def test_rejects_not_yet_supported_fields_without_calling_upstream_or_billing(client, redis, upstream, field, body):
@@ -509,6 +509,113 @@ def test_test_mode_key_supports_idempotency_replay(client, redis, upstream):
     upstream.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# M16 (design audit gap #4): BYOK provider routing. "upstream" patches
+# proxy.forward globally, so these tests distinguish the reveal call
+# (to omnibioai-auth) from the RAG forward by URL via a custom side_effect.
+# ---------------------------------------------------------------------------
+
+BYOK_BODY = {"question": "What does TP53 do?", "model": "claude", "use_own_key": True}
+RAG_RESPONSE_WITH_USAGE = {
+    "study": "default",
+    "summary": {
+        "text": "TP53 [PMID:1]", "model": "claude-3-5-sonnet-20241022",
+        "model_source": "claude", "input_tokens": 120, "output_tokens": 15,
+    },
+    "documents": [{"pmid": "1", "title": "TP53 review", "year": 2021, "citation_confidence": 0.9}],
+}
+
+
+def _byok_forward(reveal_response=(200, {"provider": "claude", "api_key": "sk-ant-real-key"}),
+                   rag_response=(200, RAG_RESPONSE_WITH_USAGE)):
+    def fake_forward(url, method, headers=None, body=None):
+        if "provider-keys" in url:
+            return reveal_response
+        return rag_response
+    return fake_forward
+
+
+def test_byok_reveals_key_and_forwards_it_with_the_rag_request(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "PROVIDER_KEY_REVEAL_SECRET", "test-reveal-secret")
+    upstream.side_effect = _byok_forward()
+
+    resp = _post(client, body=BYOK_BODY)
+    assert resp.status_code == 200
+    assert resp.json()["model_source"] == "claude"
+
+    reveal_call, rag_call = upstream.call_args_list
+    assert reveal_call.kwargs["url"] == "http://omnibioai-auth:8000/internal/organizations/42/provider-keys/claude/reveal"
+    assert reveal_call.kwargs["method"] == "POST"
+    assert reveal_call.kwargs["headers"] == {"X-Provider-Key-Reveal-Secret": "test-reveal-secret"}
+
+    assert rag_call.kwargs["body"]["model"] == "claude"
+    assert rag_call.kwargs["body"]["provider_api_key"] == "sk-ant-real-key"
+    # The key must never appear in the headers forwarded to RAG (that's
+    # still the minted JWT, exactly like every other /v1 call).
+    assert "sk-ant-real-key" not in str(rag_call.kwargs["headers"])
+
+
+def test_byok_without_configured_reveal_secret_returns_503(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "PROVIDER_KEY_REVEAL_SECRET", "")
+    resp = _post(client, body=BYOK_BODY)
+    assert resp.status_code == 503
+    upstream.assert_not_called()
+
+
+def test_byok_no_key_configured_returns_400_without_calling_rag(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "PROVIDER_KEY_REVEAL_SECRET", "test-reveal-secret")
+    upstream.side_effect = _byok_forward(reveal_response=(404, {"detail": "No claude key is configured"}))
+
+    resp = _post(client, body=BYOK_BODY)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "provider_key_not_configured"
+    assert upstream.call_count == 1  # reveal only -- RAG never called
+    assert _usage(redis) == []
+
+
+def test_byok_reveal_5xx_returns_502_without_calling_rag(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "PROVIDER_KEY_REVEAL_SECRET", "test-reveal-secret")
+    upstream.side_effect = _byok_forward(reveal_response=(500, {"detail": "CONFIG_ENCRYPTION_KEY is not set"}))
+
+    resp = _post(client, body=BYOK_BODY)
+    assert resp.status_code == 502
+    assert upstream.call_count == 1
+
+
+def test_byok_emits_token_usage_events_alongside_the_answer_event(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "PROVIDER_KEY_REVEAL_SECRET", "test-reveal-secret")
+    upstream.side_effect = _byok_forward()
+
+    resp = _post(client, body=BYOK_BODY)
+    assert resp.status_code == 200
+
+    events = _usage(redis)
+    by_resource = {e["resource"]: e for e in events}
+    assert set(by_resource) == {"literature.answer", "llm.tokens.input", "llm.tokens.output"}
+    assert by_resource["llm.tokens.input"]["quantity"] == 120 and by_resource["llm.tokens.input"]["unit"] == "tokens"
+    assert by_resource["llm.tokens.output"]["quantity"] == 15 and by_resource["llm.tokens.output"]["unit"] == "tokens"
+    assert by_resource["literature.answer"]["quantity"] == 1 and by_resource["literature.answer"]["unit"] == "requests"
+
+
+def test_default_path_never_emits_token_usage_events(client, redis, upstream):
+    """RAG_RESPONSE (the default fixture) has no input_tokens/output_tokens
+    at all -- the non-BYOK path must not emit token events."""
+    resp = _post(client)
+    assert resp.status_code == 200
+    resources = {e["resource"] for e in _usage(redis)}
+    assert resources == {"literature.answer"}
+
+
+def test_byok_search_is_rejected_regardless_of_use_own_key(client, redis, upstream):
+    """build_rag_search_query never validates model/use_own_key at all
+    (search is retrieval-only) -- confirms that stays true after M16."""
+    headers = {"Authorization": f"Bearer {KEY}"}
+    resp = client.post("/v1/literature/search", json={"question": "q", "model": "claude", "use_own_key": True},
+                       headers=headers)
+    assert resp.status_code == 200  # accepted; search never routes through a provider at all
+    upstream.assert_called_once()  # only the retrieval-only RAG call, no reveal
+
+
 def test_quota_exhausted_returns_402_without_calling_upstream(client, redis, upstream):
     redis.kv["gateway:v1:quota:42:literature.answer"] = 0
     resp = _post(client, idem="q-1")
@@ -735,8 +842,11 @@ def test_usage_upstream_5xx_is_502(client, redis, upstream):
 def test_models_is_free_static_and_never_calls_upstream(client, redis, upstream):
     resp = client.get("/v1/models", headers={"Authorization": f"Bearer {KEY}"})
     assert resp.status_code == 200
-    assert resp.json() == {"models": [{"model": "default", "source": "omnibioai_gpu",
-                                        "billed_by": "query", "price": None}]}
+    assert resp.json() == {"models": [
+        {"model": "default", "source": "omnibioai_gpu", "billed_by": "query", "price": None},
+        {"model": "claude", "source": "claude", "billed_by": "query", "price": None},
+        {"model": "openai", "source": "openai", "billed_by": "query", "price": None},
+    ]}
     upstream.assert_not_called()
     assert _usage(redis) == []
 

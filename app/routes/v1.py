@@ -52,6 +52,12 @@ store = V1Store(Config.V1_REDIS_URL, Config.USAGE_REDIS_URL)
 
 ANSWER_RESOURCE = "literature.answer"
 SEARCH_RESOURCE = "literature.search"
+# M16 (design audit gap #4): emitted alongside ANSWER_RESOURCE, only for
+# a BYOK-routed call that got a real token count back from RAG -- never
+# fabricated, same "omit rather than invent" rule the rest of this gap
+# has already followed for model/price fields.
+TOKEN_INPUT_RESOURCE = "llm.tokens.input"
+TOKEN_OUTPUT_RESOURCE = "llm.tokens.output"
 _IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,255}$")
 
 
@@ -157,6 +163,29 @@ def _upstream_error(status: int, response, request_id: str, headers: dict):
                   "The literature service rejected the request.", request_id, headers, detail=response)
 
 
+async def _reveal_provider_key(org_id: str, provider: str):
+    """M16 (BYOK provider routing, design audit gap #4): resolves the
+    organization's own decrypted key for `provider` from omnibioai-auth
+    immediately before a BYOK-routed call is forwarded to RAG -- never
+    stored or logged here, attached to this one RAG request body and
+    nowhere else. Returns (api_key, None) on success, or (None,
+    error_response) on failure. Uses the shared-secret header, never
+    the caller's own forwarded bearer token -- this is a service-to-
+    service call, not something the caller's own identity authorizes.
+    """
+    secret = Config.PROVIDER_KEY_REVEAL_SECRET
+    if not secret:
+        return None, (503, {"detail": "Provider key reveal is not configured"})
+    status, response = await proxy.forward(
+        url=f"{resolve_service('auth')}/internal/organizations/{org_id}/provider-keys/{provider}/reveal",
+        method="POST",
+        headers={"X-Provider-Key-Reveal-Secret": secret},
+    )
+    if status != 200:
+        return None, (status, response)
+    return response.get("api_key"), None
+
+
 async def _handle_billable_literature_call(
     request: Request, *, resource: str, build_rag_body, build_public_response, build_test_response,
     quota_exceeded_message: str, max_concurrent_answers: int | None = None,
@@ -220,6 +249,33 @@ async def _handle_billable_literature_call(
             return _error(409, "idempotency_in_progress",
                           "A request with this Idempotency-Key is still running.", request_id, headers)
 
+    # M16 (BYOK provider routing): resolved before the concurrency slot
+    # and quota are touched -- a request that can't get a key can't
+    # succeed regardless, so it shouldn't consume either. Skipped
+    # entirely for test_mode: a test key never reaches RAG at all, so
+    # there is nothing here for it to route through.
+    byok_model = rag_body.get("model") if not test_mode else None
+    if byok_model:
+        provider_api_key, reveal_error = await _reveal_provider_key(org_id, byok_model)
+        if reveal_error is not None:
+            reveal_status, reveal_response = reveal_error
+            if idempotency_key is not None:
+                await store.idempotency_finish(subject, idempotency_key, fingerprint, 400, None)
+            if reveal_status == 404:
+                return _error(
+                    400, "provider_key_not_configured",
+                    f"Your organization has no {byok_model} key configured. "
+                    f"Set one with PUT /v1/provider-keys/{byok_model} first.",
+                    request_id, headers,
+                )
+            if reveal_status == 503:
+                return _error(503, "provider_key_reveal_unavailable",
+                              "Provider key routing is not available.", request_id, headers)
+            return _error(502, "upstream_error",
+                          "The identity service failed to resolve your provider key.", request_id, headers,
+                          detail=reveal_response if reveal_status < 500 else None)
+        rag_body["provider_api_key"] = provider_api_key
+
     # A test key never touches real RAG capacity, so it never needs (or
     # holds) a concurrency slot -- acquiring one here, only to release it
     # a few lines down having done no real work, would just be unearned
@@ -273,12 +329,13 @@ async def _handle_billable_literature_call(
         if idempotency_key is not None:
             await store.idempotency_finish(subject, idempotency_key, fingerprint, status, public_response)
 
+        usage_dedup_key = f"{subject}:{idempotency_key}" if idempotency_key else request_id
         await store.emit_usage(
             org_id=org_id,
             user_id=user_id,
             resource=resource,
             trace_id=request_id,
-            dedup_key=f"{subject}:{idempotency_key}" if idempotency_key else request_id,
+            dedup_key=usage_dedup_key,
             metadata={
                 "request_id": request_id,
                 "client_id": identity.get("client_id"),
@@ -286,6 +343,27 @@ async def _handle_billable_literature_call(
                 "idempotency_key_sha256": request_fingerprint(idempotency_key) if idempotency_key else None,
             },
         )
+        # M16 (design audit gap #4): a BYOK-routed call that got real
+        # token counts back from RAG also emits the two token-usage
+        # events -- never fabricated for the default (non-BYOK) path,
+        # where these are always None (Ollama's own response carries no
+        # such count at all). Distinct dedup_key suffixes: emit_usage's
+        # own event_id is derived from dedup_key, and these are two
+        # different resources on the same request_id, not duplicates of
+        # each other or of the literature.answer event above.
+        token_usage = public_response.get("usage") or {}
+        if token_usage.get("input_tokens") is not None:
+            await store.emit_usage(
+                org_id=org_id, user_id=user_id, resource=TOKEN_INPUT_RESOURCE, trace_id=request_id,
+                dedup_key=f"{usage_dedup_key}:tokens:input", quantity=token_usage["input_tokens"], unit="tokens",
+                metadata={"request_id": request_id, "model": public_response.get("model_source")},
+            )
+        if token_usage.get("output_tokens") is not None:
+            await store.emit_usage(
+                org_id=org_id, user_id=user_id, resource=TOKEN_OUTPUT_RESOURCE, trace_id=request_id,
+                dedup_key=f"{usage_dedup_key}:tokens:output", quantity=token_usage["output_tokens"], unit="tokens",
+                metadata={"request_id": request_id, "model": public_response.get("model_source")},
+            )
         return JSONResponse(public_response, status_code=status, headers={**headers, "X-Request-Id": request_id})
     finally:
         # Released regardless of how the try block above exited (a quota
@@ -423,20 +501,24 @@ async def literature_usage(request: Request):
 async def literature_models(request: Request):
     """Free: the model catalog -- answer/embedding models currently
     served, with source and price. Rate-limited like every /v1 call,
-    never billed. No upstream call: there is exactly one model path
-    today, RAG's own GPU-hosted default (see the design's "largest
-    gaps" #4 -- Claude/OpenAI routing and bring-your-own-key do not
-    exist yet, and build_rag_query already rejects any request that
-    would need one).
+    never billed. No upstream call.
 
-    price is null, not a placeholder dollar figure: the design doc's own
-    pricing section says to measure real GPU cost per answer first
-    (milestone M0, 1,000 representative questions) before setting
-    prices, and that measurement has not been run. The model actually
-    used for a given answer is already reported per-call in
-    /v1/literature/answers' response (its `model` field is the real
-    value RAG used; "default" here is the stable identifier a caller
-    passes back as this endpoint's own `model` request field).
+    price is null, not a placeholder dollar figure, for every entry: the
+    design doc's own pricing section says to measure real cost per
+    answer first (milestone M0, 1,000 representative questions) before
+    setting prices, and that measurement has not been run -- true for
+    the default model and for claude/openai alike (BYOK means an org
+    pays its own provider directly; this platform still doesn't charge
+    its own per-unit fee on top). The model actually used for a given
+    answer is already reported per-call in /v1/literature/answers'
+    response (its `model` field is the real value used; "default" here
+    is the stable identifier a caller passes back as this endpoint's own
+    `model` request field).
+
+    claude/openai (M16, design audit gap #4) require use_own_key: true
+    on the actual /v1/literature/answers call -- there is no platform-
+    wide key for either, only an organization's own BYOK key (see
+    PUT /v1/provider-keys/{provider}).
     """
     request_id = getattr(request.state, "trace_id", "")
     subject, org_id, _ = _caller(request)
@@ -445,6 +527,8 @@ async def literature_models(request: Request):
         return limited
     models = [
         {"model": "default", "source": "omnibioai_gpu", "billed_by": "query", "price": None},
+        {"model": "claude", "source": "claude", "billed_by": "query", "price": None},
+        {"model": "openai", "source": "openai", "billed_by": "query", "price": None},
     ]
     return JSONResponse({"models": models}, status_code=200, headers={**headers, "X-Request-Id": request_id})
 

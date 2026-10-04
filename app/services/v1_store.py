@@ -342,10 +342,18 @@ class V1Store:
             return False
 
     async def emit_usage(self, *, org_id: str, user_id: str, resource: str, trace_id: str,
-                         dedup_key: str, metadata: dict) -> bool:
+                         dedup_key: str, metadata: dict, quantity: int = 1, unit: str = "requests") -> bool:
         """XADD one billable usage event in omnibioai-usage-client's wire
         format. event_id is derived from dedup_key, so a replayed or
         re-emitted request maps to the same id and billing counts it once.
+
+        quantity/unit default to 1/"requests" (unchanged from before
+        M16) -- a BYOK-routed call's llm.tokens.input/output events (see
+        app/routes/v1.py) pass the real token count and unit="tokens"
+        instead; dedup_key must be distinct per resource in that case
+        (e.g. f"{request_id}:tokens:input"), since this method's own
+        event_id is derived from it and two different resources sharing
+        one dedup_key would collide.
 
         A successful answer has already been returned to the caller by
         the time this runs -- a lost event here is lost revenue, never
@@ -361,8 +369,8 @@ class V1Store:
             "service": "api",
             "resource": resource,
             "action": "completed",
-            "quantity": 1,
-            "unit": "requests",
+            "quantity": quantity,
+            "unit": unit,
             "user_id": str(user_id) if user_id else None,
             "trace_id": trace_id or None,
             "metadata": {**metadata, "billable": True},
