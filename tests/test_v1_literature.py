@@ -741,6 +741,99 @@ def test_models_is_free_static_and_never_calls_upstream(client, redis, upstream)
     assert _usage(redis) == []
 
 
+# ---------------------------------------------------------------------------
+# M15 (design audit gap #4's BYOK storage, public surface): PUT/GET/DELETE
+# /v1/provider-keys(/{provider}) proxy into omnibioai-auth's own
+# /orgs/{org_id}/provider-keys(/{provider}) -- storage only, never a
+# billable call.
+# ---------------------------------------------------------------------------
+
+
+def test_set_provider_key_requires_an_organization(client, redis, upstream):
+    with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value={**USER, "org_id": None})):
+        resp = client.request(
+            "PUT", "/v1/provider-keys/claude", json={"api_key": "sk-x"}, headers={"Authorization": f"Bearer {KEY}"},
+        )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["type"] == "organization_required"
+    upstream.assert_not_called()
+
+
+def test_set_provider_key_forwards_to_auth_service(client, redis, upstream):
+    upstream.return_value = (200, {"provider": "claude", "has_key": True, "updated_at": None, "updated_by_email": None})
+    resp = client.request(
+        "PUT", "/v1/provider-keys/claude", json={"api_key": "sk-secret"}, headers={"Authorization": f"Bearer {KEY}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"provider": "claude", "has_key": True, "updated_at": None, "updated_by_email": None}
+
+    kwargs = upstream.call_args.kwargs
+    assert kwargs["url"] == "http://omnibioai-auth:8000/orgs/42/provider-keys/claude"
+    assert kwargs["method"] == "PUT" and kwargs["body"] == {"api_key": "sk-secret"}
+    assert "sk-secret" not in kwargs["headers"].get("Authorization", "")
+    assert _usage(redis) == []  # never billed
+
+
+def test_get_provider_key_forwards_to_auth_service(client, redis, upstream):
+    upstream.return_value = (200, {"provider": None, "has_key": False, "updated_at": None, "updated_by_email": None})
+    resp = client.get("/v1/provider-keys", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 200
+    assert resp.json()["has_key"] is False
+    kwargs = upstream.call_args.kwargs
+    assert kwargs["url"] == "http://omnibioai-auth:8000/orgs/42/provider-keys"
+    assert kwargs["method"] == "GET"
+
+
+def test_delete_provider_key_forwards_to_auth_service(client, redis, upstream):
+    upstream.return_value = (200, {"provider": None, "has_key": False, "updated_at": None, "updated_by_email": None})
+    resp = client.request("DELETE", "/v1/provider-keys/claude", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 200
+    kwargs = upstream.call_args.kwargs
+    assert kwargs["url"] == "http://omnibioai-auth:8000/orgs/42/provider-keys/claude"
+    assert kwargs["method"] == "DELETE"
+
+
+def test_set_provider_key_maps_403_to_forbidden(client, redis, upstream):
+    upstream.return_value = (403, {"detail": "Forbidden"})
+    resp = client.request(
+        "PUT", "/v1/provider-keys/claude", json={"api_key": "sk-x"}, headers={"Authorization": f"Bearer {KEY}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["type"] == "forbidden"
+
+
+def test_delete_provider_key_maps_404_to_not_found(client, redis, upstream):
+    upstream.return_value = (404, {"detail": "No claude key is configured for this organization."})
+    resp = client.request("DELETE", "/v1/provider-keys/claude", headers={"Authorization": f"Bearer {KEY}"})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["type"] == "not_found"
+
+
+def test_set_provider_key_maps_upstream_5xx_to_502(client, redis, upstream):
+    upstream.return_value = (500, {"detail": "CONFIG_ENCRYPTION_KEY is not set"})
+    resp = client.request(
+        "PUT", "/v1/provider-keys/claude", json={"api_key": "sk-x"}, headers={"Authorization": f"Bearer {KEY}"},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["error"]["type"] == "upstream_error"
+
+
+def test_set_provider_key_rejects_non_json_body(client, redis, upstream):
+    resp = client.request(
+        "PUT", "/v1/provider-keys/claude", content=b"not json",
+        headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+    upstream.assert_not_called()
+
+
+def test_provider_key_routes_are_rate_limited(client, redis, upstream, monkeypatch):
+    monkeypatch.setattr(Config, "V1_RATE_LIMIT_PER_MINUTE", 1)
+    upstream.return_value = (200, {"provider": None, "has_key": False, "updated_at": None, "updated_by_email": None})
+    assert client.get("/v1/provider-keys", headers={"Authorization": f"Bearer {KEY}"}).status_code == 200
+    assert client.get("/v1/provider-keys", headers={"Authorization": f"Bearer {KEY}"}).status_code == 429
+
+
 def test_unauthenticated_v1_is_rejected(client):
     assert client.post("/v1/literature/answers", json=BODY).status_code == 401
 

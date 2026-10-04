@@ -23,6 +23,17 @@ SERVICE_MAP = {
     # for the "rag" entry above. See SERVICE_PERMISSION_MAP below for the
     # permission this requires.
     "billing": "http://billing-service:8005",
+    # Public API v1 ("M15": PUT/GET/DELETE /v1/provider-keys/{provider}):
+    # proxies into omnibioai-auth's own PUT/GET/DELETE
+    # /orgs/{id}/provider-keys(/{provider}) (M14's BYOK provider-key
+    # storage), the exact same forwarded-bearer-token pattern the
+    # "billing" entry above already uses for GET /v1/usage. The real
+    # authorization decision is manage_org, checked live by that
+    # endpoint's own require_org_permission_or_platform_admin dependency
+    # -- not this gateway, and not the JWT's permissions claim, which
+    # never embeds org-scoped permissions at all (they're resolved fresh
+    # per request against the caller's live membership).
+    "auth": "http://omnibioai-auth:8000",
 }
 
 
@@ -68,6 +79,14 @@ SERVICE_PERMISSION_MAP = {
     # Foundation integration made them real. This is usage.read's first
     # real consumer.
     "billing": "usage.read",
+    # Public API v1 (PUT/GET/DELETE /v1/provider-keys/{provider}):
+    # omnibioai-auth's Permission Registry already has
+    # "provider_keys.manage" registered as "reserved -- not yet enforced
+    # by any route" -- the exact same state usage.read was in before
+    # this gateway sent it as context. This is provider_keys.manage's
+    # first real consumer; the real enforcement is still manage_org,
+    # live, at the destination (see the SERVICE_MAP entry's own comment).
+    "auth": "provider_keys.manage",
 }
 
 
@@ -86,6 +105,7 @@ def resolve_required_permission(service: str) -> str | None:
 # this so /v1/literature/* is authorized exactly like the rag service.
 V1_SERVICE_MAP = {
     "literature": "rag",
+    "provider-keys": "auth",
 }
 
 
