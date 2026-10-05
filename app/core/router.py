@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.core.router.
+
+Purpose:
+    Defines resolve_service, resolve_required_permission and service_for_path for app.core.router.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 SERVICE_MAP = {
     "workbench": "http://workbench:8000",
     "tes": "http://tes:8081",

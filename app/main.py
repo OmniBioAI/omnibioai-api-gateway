@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.main.
+
+Purpose:
+    Defines HTTP route handlers for app.main, including health and version.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import asyncio
 from contextlib import asynccontextmanager
 

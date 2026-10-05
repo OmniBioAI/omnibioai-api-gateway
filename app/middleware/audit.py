@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.middleware.audit.
+
+Purpose:
+    Defines AuditMiddleware and audit_log for app.middleware.audit.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import time
 
 from starlette.middleware.base import BaseHTTPMiddleware

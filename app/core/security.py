@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.core.security.
+
+Purpose:
+    Defines generate_trace_id and attach_trace for app.core.security.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import uuid
 from app.middleware.audit import audit_log
 from app.services.audit_client import build_audit_event

@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.middleware.hpc.
+
+Purpose:
+    Defines HPCMiddleware HTTP request middleware.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 

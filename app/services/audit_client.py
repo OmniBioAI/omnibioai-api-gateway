@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.services.audit_client.
+
+Purpose:
+    Defines sign_audit_event, build_audit_event, fire_audit and audit_log for app.services.audit_client.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import asyncio
 import hashlib
 import hmac

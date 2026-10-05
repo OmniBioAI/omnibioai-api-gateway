@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.services.iam_client.
+
+Purpose:
+    Defines is_api_key, api_key_hash and IAMClient for app.services.iam_client.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import hashlib
 import hmac
 import json

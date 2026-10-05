@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.routes.auth_verify.
+
+Purpose:
+    Defines HTTP route handlers for app.routes.auth_verify, including auth_verify.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from fastapi import APIRouter, Request
 
 # SSO Phase 2 PR8: a real, dedicated GET /auth/verify contract.

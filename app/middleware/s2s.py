@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.middleware.s2s.
+
+Purpose:
+    Defines TraceMiddleware HTTP request middleware.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware

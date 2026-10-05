@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.services.hpc_policy_client.
+
+Purpose:
+    Defines HPCPolicyClient with is_compute_service and evaluate methods for app.services.hpc_policy_client.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import httpx
 
 HPC_COMPUTE_SERVICES = {"tes", "toolserver", "workbench"}

@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.core.proxy.
+
+Purpose:
+    Defines ProxyClient with forward methods for app.core.proxy.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import httpx
 from app.core.config import Config
 

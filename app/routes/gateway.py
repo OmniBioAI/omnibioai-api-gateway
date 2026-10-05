@@ -1,3 +1,13 @@
+"""
+OmniBioAI app.routes.gateway.
+
+Purpose:
+    Defines HTTP route handlers for app.routes.gateway, including gateway.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 import asyncio
 
 from fastapi import APIRouter, Request
