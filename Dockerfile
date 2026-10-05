@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1
+# OmniBioAI — API Gateway
+# Purpose: Build the FastAPI API gateway container.
+# Author: Manish Kumar <manish@omnibioai.org>
+
 FROM python:3.11-slim AS runtime
 
+# System dependencies
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl git \
  && rm -rf /var/lib/apt/lists/*
@@ -23,6 +28,7 @@ WORKDIR /app
 # requirements), so the token must be available for pip's own git clone
 # here, not just a separate pre-install step.
 COPY pyproject.toml .
+# Application source
 COPY app/ ./app/
 
 # Uses a BuildKit secret mount (not ARG/ENV -- ARG/ENV values get echoed
@@ -58,11 +64,14 @@ RUN --mount=type=secret,id=github_token \
 
 RUN chown -R omnibioai:omnibioai /app /home/omnibioai
 USER omnibioai
+# Runtime configuration
 ENV HOME=/home/omnibioai TMPDIR=/tmp
 
 EXPOSE 8080
 
+# Health check
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
+# Entrypoint and default command
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
