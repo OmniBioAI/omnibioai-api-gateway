@@ -264,7 +264,7 @@ via a separate route.
 ### Via OmniBioAI Studio (recommended)
 
 ```bash
-cd ~/Desktop/machine/omnibioai-studio
+cd ~/Desktop/omnibioai-ecosystem/omnibioai-studio
 docker compose up -d api-gateway
 ```
 
@@ -288,7 +288,7 @@ Set in `omnibioai-studio/.env`:
 ## Testing
 
 ```bash
-cd ~/Desktop/machine/omnibioai-api-gateway
+cd ~/Desktop/omnibioai-ecosystem/omnibioai-api-gateway
 pytest tests/ -v --cov=app
 
 # The command above is the supported validation entrypoint. Test counts and
