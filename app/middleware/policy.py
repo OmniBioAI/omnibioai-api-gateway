@@ -9,6 +9,7 @@ Author:
 """
 
 from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.public_routes import is_public_research_submission
 from starlette.responses import JSONResponse
 
 from app.core.router import resolve_required_permission, service_for_path
@@ -45,7 +46,8 @@ class PolicyMiddleware(BaseHTTPMiddleware):
         self.policy = policy
 
     async def dispatch(self, request, call_next):
-        if request.url.path in _SKIP_PATHS or request.url.path.startswith(_SKIP_PREFIXES):
+        if (request.url.path in _SKIP_PATHS
+                or is_public_research_submission(request) or request.url.path.startswith(_SKIP_PREFIXES)):
             return await call_next(request)
 
         user = getattr(request.state, "user", None)

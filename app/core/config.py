@@ -9,6 +9,7 @@ Author:
 """
 
 import os
+import ipaddress
 
 
 class Config:
@@ -34,7 +35,14 @@ class Config:
     REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
     JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
     SERVICE_SECRET = os.getenv("GATEWAY_SECRET", "dev-secret")
+    RESEARCH_INQUIRY_BACKEND_URL = os.getenv("RESEARCH_INQUIRY_BACKEND_URL", "").rstrip("/")
+    RESEARCH_INQUIRY_TRUSTED_PROXIES = tuple(
+        ipaddress.ip_network(value.strip(), strict=False)
+        for value in os.getenv("RESEARCH_INQUIRY_TRUSTED_PROXIES", "").split(",") if value.strip()
+    )
     ROUTE_TIMEOUT = int(os.getenv("ROUTE_TIMEOUT", "15"))
+    if any(network.prefixlen == 0 for network in RESEARCH_INQUIRY_TRUSTED_PROXIES):
+        raise RuntimeError("Research inquiry trusted proxies must not trust every address")
     # omni_sk_ API keys: the gateway trades a key for a short-lived access
     # token at omnibioai-auth's POST /auth/api-keys/exchange, which only
     # accepts calls carrying this shared secret. Empty = API keys rejected.

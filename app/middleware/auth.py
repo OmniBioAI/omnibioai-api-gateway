@@ -9,6 +9,7 @@ Author:
 """
 
 from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.public_routes import is_public_research_submission
 from starlette.responses import JSONResponse
 
 from app.services.iam_client import IAMClient, is_api_key
@@ -35,7 +36,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.iam = iam
 
     async def dispatch(self, request, call_next):
-        if request.url.path in _SKIP_PATHS or request.url.path.startswith(_SKIP_PREFIXES):
+        if (request.url.path in _SKIP_PATHS
+                or is_public_research_submission(request) or request.url.path.startswith(_SKIP_PREFIXES)):
             return await call_next(request)
 
         token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()

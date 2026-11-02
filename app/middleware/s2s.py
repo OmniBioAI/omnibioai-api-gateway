@@ -9,6 +9,7 @@ Author:
 """
 
 import uuid
+from app.core.public_routes import is_public_research_submission
 
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -21,6 +22,9 @@ class TraceMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request, call_next):
         trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+        if is_public_research_submission(request):
+            # Never let anonymous input become personal content in trace logs.
+            trace_id = str(uuid.uuid4())
         request.state.trace_id = trace_id
 
         response = await call_next(request)

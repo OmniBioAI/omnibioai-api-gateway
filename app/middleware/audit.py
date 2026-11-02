@@ -11,6 +11,7 @@ Author:
 import time
 
 from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.public_routes import is_public_research_submission
 
 from app.services.audit_client import build_audit_event, fire_audit
 
@@ -42,7 +43,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
             decision="allow" if response.status_code < 400 else "deny",
             trace_id=trace_id,
             context={
-                "endpoint": str(request.url),
+                "endpoint": request.url.path if is_public_research_submission(request) else str(request.url),
                 "latency_ms": latency_ms,
                 "status_code": response.status_code,
             },
