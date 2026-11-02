@@ -9,6 +9,7 @@ Author:
 """
 
 from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.public_routes import is_public_research_submission
 from starlette.responses import JSONResponse
 
 from app.services.hpc_policy_client import HPCPolicyClient
@@ -29,7 +30,8 @@ class HPCMiddleware(BaseHTTPMiddleware):
         self.hpc = hpc
 
     async def dispatch(self, request, call_next):
-        if request.url.path in _SKIP_PATHS or request.url.path.startswith(_SKIP_PREFIXES):
+        if (request.url.path in _SKIP_PATHS
+                or is_public_research_submission(request) or request.url.path.startswith(_SKIP_PREFIXES)):
             return await call_next(request)
 
         parts = request.url.path.strip("/").split("/")
