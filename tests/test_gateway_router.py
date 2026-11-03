@@ -3,7 +3,7 @@ Tests for the gateway catch-all route (app/routes/gateway.py).
 
 Route pattern: /{service}/{path:path}
 resolve_service() maps service slug → upstream URL.
-Unknown service → {"error": "unknown service"} with HTTP 200.
+Unknown service → {"error": "unknown service"} with HTTP 404.
 Known service → proxy attempt. ProxyClient.forward() is mocked (see
                 conftest._isolate_external_io) to a deterministic success by
                 default, so these tests never make real network calls; tests
@@ -29,7 +29,7 @@ from app.core.router import SERVICE_MAP
 
 def test_unknown_service_returns_error_body(client, valid_user):
     """An authenticated request to a service slug absent from SERVICE_MAP
-    returns HTTP 200 with {"error": "unknown service"}, not a 404/500."""
+    returns HTTP 404 with a stable error body."""
     with (
         patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
         patch.object(
@@ -42,7 +42,7 @@ def test_unknown_service_returns_error_body(client, valid_user):
             "/nonexistent-service/some/path",
             headers={"Authorization": "Bearer token"},
         )
-    assert resp.status_code == 200
+    assert resp.status_code == 404
     assert resp.json().get("error") == "unknown service"
 
 
@@ -319,7 +319,7 @@ def test_unknown_service_response_unchanged(client, valid_user):
             "/nonexistent-service/some/path",
             headers={"Authorization": "Bearer token"},
         )
-    assert resp.status_code == 200
+    assert resp.status_code == 404
     assert resp.json() == {"error": "unknown service"}
 
 
