@@ -79,4 +79,5 @@ def test_services_not_in_service_map_are_unreachable(client, valid_user, missing
     ):
         resp = client.get(f"/{missing_service}/ping", headers={"Authorization": "Bearer tok"})
 
+    assert resp.status_code == 404
     assert resp.json() == {"error": "unknown service"}

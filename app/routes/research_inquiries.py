@@ -12,11 +12,23 @@ from app.core.config import Config
 router = APIRouter()
 _upstream_client = httpx.AsyncClient
 MAX_REQUEST_BYTES = 16_384
-SAFE_RESPONSE_HEADERS = {"content-type", "cache-control", "retry-after", "access-control-allow-origin", "access-control-allow-methods", "access-control-allow-headers", "vary"}
+SAFE_RESPONSE_HEADERS = {
+    "content-type",
+    "cache-control",
+    "retry-after",
+    "access-control-allow-origin",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "vary",
+}
 
 
 def _unavailable(status=503):
-    return JSONResponse({"error": "Inquiry service unavailable"}, status_code=status, headers={"Cache-Control": "no-store"})
+    return JSONResponse(
+        {"error": "Inquiry service unavailable"},
+        status_code=status,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _client_ip(request: Request) -> str:
@@ -37,14 +49,22 @@ def _client_ip(request: Request) -> str:
 @router.api_route("/api/v1/research-inquiries", methods=["POST", "OPTIONS"])
 async def research_inquiries(request: Request):
     if not Config.RESEARCH_INQUIRY_BACKEND_URL:
-        return JSONResponse({"error": "Inquiry service unavailable"}, status_code=503, headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            {"error": "Inquiry service unavailable"},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
     declared = request.headers.get("content-length")
     if declared and (not declared.isdecimal() or int(declared) > MAX_REQUEST_BYTES):
         return JSONResponse({"error": "Request is too large"}, status_code=413, headers={"Cache-Control": "no-store"})
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > MAX_REQUEST_BYTES:
-            return JSONResponse({"error": "Request is too large"}, status_code=413, headers={"Cache-Control": "no-store"})
+            return JSONResponse(
+                {"error": "Request is too large"},
+                status_code=413,
+                headers={"Cache-Control": "no-store"},
+            )
         body.extend(chunk)
     target = f"{Config.RESEARCH_INQUIRY_BACKEND_URL}/api/v1/research-inquiries"
     headers = {
@@ -63,8 +83,16 @@ async def research_inquiries(request: Request):
         async with _upstream_client(timeout=10, follow_redirects=False) as client:
             upstream = await client.request(request.method, target, headers=headers, content=bytes(body))
     except httpx.HTTPError:
-        return JSONResponse({"error": "Inquiry service unavailable"}, status_code=503, headers={"Cache-Control": "no-store"})
-    response_headers = {name: value for name, value in upstream.headers.items() if name.lower() in SAFE_RESPONSE_HEADERS}
+        return JSONResponse(
+            {"error": "Inquiry service unavailable"},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    response_headers = {
+        name: value
+        for name, value in upstream.headers.items()
+        if name.lower() in SAFE_RESPONSE_HEADERS
+    }
     response_headers["cache-control"] = "no-store"
     if request.method == "OPTIONS":
         if upstream.status_code not in {200, 400}:
@@ -75,7 +103,11 @@ async def research_inquiries(request: Request):
         return _unavailable()
     content_type = upstream.headers.get("content-type", "")
     if "application/json" not in content_type and upstream.status_code != 204:
-        return JSONResponse({"error": "Inquiry service unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            {"error": "Inquiry service unavailable"},
+            status_code=502,
+            headers={"Cache-Control": "no-store"},
+        )
     if upstream.status_code != 204:
         try:
             data = upstream.json()
