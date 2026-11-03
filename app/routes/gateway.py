@@ -106,7 +106,10 @@ async def gateway(service: str, path: str, request: Request):
     target = resolve_service(service)
 
     if not target:
-        return {"error": "unknown service"}
+        return JSONResponse(
+            content={"error": "unknown service"},
+            status_code=404,
+        )
 
     # Preserve encoded query parameters for upstream contracts such as TES's
     # `server_id` selector.  The generic proxy must not silently change the
