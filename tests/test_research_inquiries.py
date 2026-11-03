@@ -39,7 +39,15 @@ def valid_payload():
 
 def test_public_route_requires_no_admin_token_and_relays_real_201(client, monkeypatch):
     monkeypatch.setattr(Config, "RESEARCH_INQUIRY_BACKEND_URL", "http://auth:8001")
-    upstream = httpx.Response(201, json={"status": "received", "inquiry_id": "00000000-0000-4000-8000-000000000001", "submitted_at": "2026-11-02T00:00:00Z"}, headers={"Content-Type": "application/json"})
+    upstream = httpx.Response(
+        201,
+        json={
+            "status": "received",
+            "inquiry_id": "00000000-0000-4000-8000-000000000001",
+            "submitted_at": "2026-11-02T00:00:00Z",
+        },
+        headers={"Content-Type": "application/json"},
+    )
     mocked = MockClient(upstream)
     with patch("app.routes.research_inquiries._upstream_client", return_value=mocked):
         response = client.post("/api/v1/research-inquiries", json=valid_payload(), headers={"Origin": "https://omnibioai.org"})
@@ -52,7 +60,14 @@ def test_unconfigured_network_failure_and_oversize_never_return_success(client, 
     monkeypatch.setattr(Config, "RESEARCH_INQUIRY_BACKEND_URL", "")
     assert client.post("/api/v1/research-inquiries", json=valid_payload()).status_code == 503
     monkeypatch.setattr(Config, "RESEARCH_INQUIRY_BACKEND_URL", "http://auth:8001")
-    assert client.post("/api/v1/research-inquiries", content=b"x" * 17000, headers={"Content-Type": "application/json"}).status_code == 413
+    assert (
+        client.post(
+            "/api/v1/research-inquiries",
+            content=b"x" * 17000,
+            headers={"Content-Type": "application/json"},
+        ).status_code
+        == 413
+    )
     with patch("app.routes.research_inquiries._upstream_client", side_effect=httpx.ConnectError("synthetic failure")):
         assert client.post("/api/v1/research-inquiries", json=valid_payload()).status_code == 503
 
@@ -60,7 +75,10 @@ def test_unconfigured_network_failure_and_oversize_never_return_success(client, 
 def test_upstream_cors_and_rate_limit_responses_are_preserved(client, monkeypatch):
     monkeypatch.setattr(Config, "RESEARCH_INQUIRY_BACKEND_URL", "http://auth:8001")
     upstream = httpx.Response(429, json={"error": "Too many requests"}, headers={
-        "Content-Type": "application/json", "Retry-After": "60", "Access-Control-Allow-Origin": "https://omnibioai.org", "Cache-Control": "no-store",
+        "Content-Type": "application/json",
+        "Retry-After": "60",
+        "Access-Control-Allow-Origin": "https://omnibioai.org",
+        "Cache-Control": "no-store",
     })
     with patch("app.routes.research_inquiries._upstream_client", return_value=MockClient(upstream)):
         response = client.post("/api/v1/research-inquiries", json=valid_payload(), headers={"Origin": "https://omnibioai.org"})
