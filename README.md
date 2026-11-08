@@ -12,37 +12,8 @@ map is limited to the services configured in `app/core/router.py`.
 
 ## Architecture
 
-```
-Internet / Client / Studio
+![OmniBioAI API Gateway Architecture](docs/architecture/omnibioai-gateway-request-flow.png)
 
-↓
-
-api-gateway :8080        ← single entry point
-
-↓
-
-TraceMiddleware          ← generates X-Trace-Id UUID
-
-↓
-
-AuthMiddleware           ← JWT validation via IAM client + Redis cache
-
-↓
-
-PolicyMiddleware         ← RBAC/ABAC via policy-engine
-
-↓
-
-HPCMiddleware            ← GPU/CPU quota via hpc-policy-engine (compute paths only)
-
-↓
-
-AuditMiddleware          ← async audit log via security-audit
-
-↓
-
-target service           ← workbench / tes / toolserver / model-registry / rag
-```
 
 **Failure policy:**
 
