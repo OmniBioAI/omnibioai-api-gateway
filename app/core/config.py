@@ -41,6 +41,16 @@ class Config:
         for value in os.getenv("RESEARCH_INQUIRY_TRUSTED_PROXIES", "").split(",") if value.strip()
     )
     ROUTE_TIMEOUT = int(os.getenv("ROUTE_TIMEOUT", "15"))
+    # Storage transfers are streamed end-to-end and may legitimately run much
+    # longer than ordinary JSON API calls.  The byte limit is enforced both
+    # from Content-Length (before contacting Workbench) and while consuming a
+    # chunked request body.
+    STORAGE_MAX_REQUEST_BYTES = int(
+        os.getenv("STORAGE_MAX_REQUEST_BYTES", "10000000000")
+    )
+    STORAGE_TRANSFER_TIMEOUT = int(
+        os.getenv("STORAGE_TRANSFER_TIMEOUT", "3600")
+    )
     if any(network.prefixlen == 0 for network in RESEARCH_INQUIRY_TRUSTED_PROXIES):
         raise RuntimeError("Research inquiry trusted proxies must not trust every address")
     # omni_sk_ API keys: the gateway trades a key for a short-lived access

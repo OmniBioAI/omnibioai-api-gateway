@@ -28,6 +28,7 @@ from app.routes.auth_verify import router as auth_verify_router
 from app.routes.gateway import router
 from app.routes.v1 import router as v1_router
 from app.routes.research_inquiries import router as research_inquiries_router
+from app.routes.storage import router as storage_router
 from app.services.mcp_auth import MCPBearerAuthASGIMiddleware
 from app.services.mcp_server import build_mcp_server
 
@@ -117,6 +118,7 @@ app.add_middleware(TraceMiddleware)
 app.include_router(auth_verify_router)
 # /v1 before the catch-all too, or /{service}/{path} would take "v1" as a
 # service name.
+app.include_router(storage_router)
 app.include_router(v1_router)
 app.include_router(research_inquiries_router)
 

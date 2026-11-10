@@ -131,6 +131,20 @@ identity guarantee.
 - Distributed trace ID propagation (X-Trace-Id header)
 - Redis pub/sub cache invalidation on logout
 - Rate limiting on auth endpoints (via nginx — 10 req/min, burst 5)
+- Streaming `/v1/storage/artifacts*` and `/v1/storage/usage` aliases to
+  Workbench, with bounded request bodies and long-transfer timeouts
+
+### Public storage aliases
+
+Storage aliases pass through the normal IAM and policy middleware and forward
+the verified bearer identity to Workbench. Upload and download bodies are
+streamed without full-body buffering; hop-by-hop headers are removed and
+upstream redirects are returned without being followed. The configured limit
+is enforced from `Content-Length` and while reading chunked requests.
+
+Storage currently inherits Workbench's `workflow.execute` Gateway permission.
+Follow-up: register and grant `storage.read`/`storage.write` in Auth, add
+exact Policy Engine mappings, and select them per storage route and method.
 
 ---
 
@@ -253,6 +267,8 @@ Set in `omnibioai-studio/.env`:
 | `REDIS_URL` | `redis://redis:6379` | Redis for token cache + pub/sub |
 | `JWT_SECRET` | — | JWT signing secret (auto-generated) |
 | `ROUTE_TIMEOUT` | `15` | Upstream request timeout (seconds) |
+| `STORAGE_MAX_REQUEST_BYTES` | `10000000000` | Maximum streamed storage request body, in decimal bytes |
+| `STORAGE_TRANSFER_TIMEOUT` | `3600` | Read/write timeout for streamed storage transfers, in seconds |
 
 ---
 
