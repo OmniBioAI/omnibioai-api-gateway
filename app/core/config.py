@@ -120,4 +120,7 @@ class Config:
     # this only ever adds a delayed write, never a duplicate billing path
     # (drain uses the event's own deterministic event_id, same dedup
     # omnibioai-billing's consumer already enforces).
+    # The image sets this to /var/lib/omnibioai-gateway/usage_outbox.db, which
+    # deployments back with a named volume: a container's /tmp is lost on every
+    # recreate, and pending events with it. The /tmp default is for local runs.
     USAGE_OUTBOX_PATH = os.getenv("USAGE_OUTBOX_PATH", "/tmp/gateway_usage_outbox.db")

@@ -63,9 +63,14 @@ RUN --mount=type=secret,id=github_token \
       pip install --no-cache-dir --upgrade-strategy only-if-needed .
 
 RUN chown -R omnibioai:omnibioai /app /home/omnibioai
+# Persistent gateway state (the usage outbox). Deployments mount a named volume
+# here; created in the image and owned by the service user, so a fresh empty
+# volume inherits that ownership on first mount.
+RUN install -d -o omnibioai -g omnibioai -m 0700 /var/lib/omnibioai-gateway
 USER omnibioai
 # Runtime configuration
-ENV HOME=/home/omnibioai TMPDIR=/tmp
+ENV HOME=/home/omnibioai TMPDIR=/tmp \
+    USAGE_OUTBOX_PATH=/var/lib/omnibioai-gateway/usage_outbox.db
 
 EXPOSE 8080
 
