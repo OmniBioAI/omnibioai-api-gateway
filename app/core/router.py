@@ -116,6 +116,9 @@ def resolve_required_permission(service: str) -> str | None:
 V1_SERVICE_MAP = {
     "literature": "rag",
     "provider-keys": "auth",
+    # Temporary coarse permission boundary. Auth and Policy Engine do not yet
+    # register storage.read/storage.write; see README's follow-up note.
+    "storage": "workbench",
 }
 
 

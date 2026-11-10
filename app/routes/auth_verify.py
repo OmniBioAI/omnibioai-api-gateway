@@ -21,7 +21,7 @@ from fastapi import APIRouter, Request
 # inspects the status code (nginx's own error_page synthesizes the actual
 # 401 body seen by the client -- see nginx-router.conf's @cc_unauthorized/
 # @devhub_unauthorized), so that accidental 200 happened to work, but a
-# future change to the catch-all's default status code would have broken
+# changing the catch-all's default status code would have broken
 # every nginx-gated route (/_svc/control, /rag/) silently, with nothing
 # testing this path today.
 #
