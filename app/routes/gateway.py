@@ -9,6 +9,8 @@ Author:
 """
 
 import asyncio
+import posixpath
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -101,6 +103,35 @@ def build_upstream_headers(request: Request) -> dict:
     return upstream_headers
 
 
+# Workbench paths this gateway does not forward for now: the agent graph
+# route, the async agent run API, and agent_workflow_studio's native run.
+# Workbench does not yet check graph inputs or run owners on them. The
+# Studio router denies the same paths; this covers api.omnibioai.org and
+# the host port, which don't go through the router.
+DENIED_WORKBENCH_PREFIXES = (
+    "/api/agent/route/",
+    "/ops/agent/run/",
+    "/plugins/agent_workflow_studio/api/ui-run/",
+)
+
+
+def _normalized_path(path: str) -> str:
+    """Decode repeatedly and resolve ``//``, ``.`` and ``..`` so an encoded
+    or padded spelling compares the same as the plain one."""
+    for _ in range(5):
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    normalized = posixpath.normpath("/" + path.replace("\\", "/")).lower()
+    return normalized.rstrip("/") + "/"
+
+
+def denied_workbench_path(path: str) -> bool:
+    normalized = _normalized_path(path)
+    return any(normalized.startswith(prefix) for prefix in DENIED_WORKBENCH_PREFIXES)
+
+
 @router.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def gateway(service: str, path: str, request: Request):
     target = resolve_service(service)
@@ -109,6 +140,12 @@ async def gateway(service: str, path: str, request: Request):
         return JSONResponse(
             content={"error": "unknown service"},
             status_code=404,
+        )
+
+    if service == "workbench" and denied_workbench_path(path):
+        return JSONResponse(
+            content={"error": "This Workbench endpoint is not available through the gateway."},
+            status_code=403,
         )
 
     # Preserve encoded query parameters for upstream contracts such as TES's
