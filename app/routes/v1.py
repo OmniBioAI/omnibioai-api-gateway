@@ -156,6 +156,10 @@ async def _forward(request: Request, method: str, path: str, body=None):
 
 
 def _upstream_error(status: int, response, request_id: str, headers: dict):
+    if status == 429:
+        # RAG's own per-user limit (v6 search): a rate limit, not a rejected request.
+        return _error(429, "rate_limited", "The literature service is rate limiting this caller. Retry shortly.",
+                      request_id, {**headers, "Retry-After": "60"})
     if status >= 500:
         return _error(502 if status == 500 else status, "upstream_error",
                       "The literature service failed to answer. You were not charged.", request_id, headers)
@@ -188,7 +192,7 @@ async def _reveal_provider_key(org_id: str, provider: str):
 
 async def _handle_billable_literature_call(
     request: Request, *, resource: str, build_rag_body, build_public_response, build_test_response,
-    quota_exceeded_message: str, max_concurrent_answers: int | None = None,
+    quota_exceeded_message: str, max_concurrent_answers: int | None = None, rag_path: str = "v1/query",
 ):
     """Shared lifecycle for every billable /v1/literature/* call
     (currently /answers and /search): auth'd-org check, contract
@@ -312,7 +316,7 @@ async def _handle_billable_literature_call(
             return _error(402, "quota_exceeded", quota_exceeded_message, request_id, headers)
 
         started = time.monotonic()
-        status, response = await _forward(request, "POST", "v1/query", rag_body)
+        status, response = await _forward(request, "POST", rag_path, rag_body)
         latency_ms = round((time.monotonic() - started) * 1000)
 
         if not 200 <= status < 300:
@@ -392,8 +396,10 @@ async def literature_answers(request: Request):
 async def literature_search(request: Request):
     """Billable unit: 1 search (see the design doc's pricing table --
     priced around 1/10th of an answer). Retrieval only: never invokes an
-    LLM, via RAG's mode="search" (app/services/literature_contract.py's
-    build_rag_search_query sets it)."""
+    LLM. Served by RAG v6 (POST /v1/pubmed/search, Qwen3-4B per-study
+    indexes; ecosystem#110), with the caller's own token forwarded as for
+    every /v1 call; app/services/literature_contract.py keeps the public
+    response shape."""
     return await _handle_billable_literature_call(
         request,
         resource=SEARCH_RESOURCE,
@@ -402,22 +408,35 @@ async def literature_search(request: Request):
         build_test_response=build_test_search,
         quota_exceeded_message="Your organization has used its included searches. "
                                 "Add a payment method or upgrade the plan.",
+        rag_path="v1/pubmed/search",
     )
+
+
+def _v6_study_rows(response: dict) -> list[dict]:
+    """RAG v6's GET /v1/pubmed/studies rows ({name, kind, vector_count}) in
+    the public {name, abstract_count} shape: one indexed vector per abstract."""
+    return [
+        {"name": s.get("name"), "abstract_count": s.get("vector_count")}
+        for s in (response.get("studies") or [])
+    ]
 
 
 @router.get("/literature/studies")
 async def literature_studies(request: Request):
-    """Free: the queryable studies/domains, from omnibioai-rag GET /v1/studies.
-    Rate-limited like every /v1 call, never billed."""
+    """Free: the queryable studies/domains, from omnibioai-rag v6 GET
+    /v1/pubmed/studies (ecosystem#110), in the {"studies": [{name,
+    abstract_count}]} shape this route has always returned. Rate-limited
+    like every /v1 call, never billed."""
     request_id = getattr(request.state, "trace_id", "")
     subject, org_id, _ = _caller(request)
     headers, limited = await _rate_limited(request, subject, org_id, request_id)
     if limited:
         return limited
-    status, response = await _forward(request, "GET", "v1/studies")
+    status, response = await _forward(request, "GET", "v1/pubmed/studies")
     if not 200 <= status < 300:
         return _upstream_error(status, response, request_id, headers)
-    return JSONResponse(response, status_code=status, headers={**headers, "X-Request-Id": request_id})
+    return JSONResponse({"studies": _v6_study_rows(response)}, status_code=status,
+                        headers={**headers, "X-Request-Id": request_id})
 
 
 @router.get("/literature/domains")
@@ -425,22 +444,19 @@ async def literature_domains(request: Request):
     """Free: the queryable research domains, under the frozen public
     name the design doc uses ("domain", not RAG's internal "study").
     Same underlying data as /literature/studies above (kept as-is for
-    backward compatibility) via the same omnibioai-rag GET /v1/studies
-    call, reshaped to the public contract. Rate-limited like every /v1
-    call, never billed."""
+    backward compatibility) via the same omnibioai-rag v6 GET
+    /v1/pubmed/studies call, reshaped to the public contract.
+    Rate-limited like every /v1 call, never billed."""
     request_id = getattr(request.state, "trace_id", "")
     subject, org_id, _ = _caller(request)
     headers, limited = await _rate_limited(request, subject, org_id, request_id)
     if limited:
         return limited
-    status, response = await _forward(request, "GET", "v1/studies")
+    status, response = await _forward(request, "GET", "v1/pubmed/studies")
     if not 200 <= status < 300:
         return _upstream_error(status, response, request_id, headers)
-    domains = [
-        {"name": s.get("name"), "abstract_count": s.get("abstract_count")}
-        for s in (response.get("studies") or [])
-    ]
-    return JSONResponse({"domains": domains}, status_code=status, headers={**headers, "X-Request-Id": request_id})
+    return JSONResponse({"domains": _v6_study_rows(response)}, status_code=status,
+                        headers={**headers, "X-Request-Id": request_id})
 
 
 @router.get("/usage")

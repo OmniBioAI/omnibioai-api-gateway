@@ -85,12 +85,23 @@ def build_rag_query(body: dict) -> dict:
     return query
 
 
+# RAG v6's own per-request cap on k (omnibioai-rag RAG_V6_MAX_K); larger
+# max_results values are clamped here rather than turned into a 422 upstream.
+PUBMED_V6_MAX_K = 50
+PUBMED_V6_DEFAULT_K = 10
+
+
 def build_rag_search_query(body: dict) -> dict:
-    """Translate a public /v1/literature/search request body into RAG's
-    POST /v1/query body (with mode="search" set by the caller, not here --
-    that's the one field this function doesn't own, since it's not part of
-    the public contract). Raises UnsupportedRequestError for a missing/
-    blank question, the only field this endpoint requires.
+    """Translate a public /v1/literature/search request body into RAG v6's
+    POST /v1/pubmed/search body (ecosystem#110): {query, studies, k}.
+
+    `domain` is the one study to search. RAG resolves legacy spellings
+    itself ("DNA damage response" -> DNA_damage_response) and answers an
+    unknown name with 400 unknown_study, which reaches the caller as an
+    invalid_request carrying RAG's detail. A request without `domain` is
+    rejected here: the old fallback study "default" never existed, so such
+    requests used to fail upstream anyway -- now they fail clearly, before
+    any quota is reserved.
 
     Unlike build_rag_query above, model/use_own_key/stream are not
     validated here at all: search is retrieval-only regardless of what a
@@ -104,36 +115,42 @@ def build_rag_search_query(body: dict) -> dict:
     if not isinstance(question, str) or not question.strip():
         raise UnsupportedRequestError("question", "\"question\" is required and must be a non-empty string.")
 
-    query: dict = {"query": question, "study": body.get("domain") or "default", "mode": "search"}
+    domain = body.get("domain")
+    if not isinstance(domain, str) or not domain.strip():
+        raise UnsupportedRequestError(
+            "domain", "\"domain\" is required: name the study to search (see GET /v1/literature/domains).",
+        )
+
+    k = PUBMED_V6_DEFAULT_K
     max_results = body.get("max_results")
     if isinstance(max_results, (int, float)) and not isinstance(max_results, bool) and max_results > 0:
-        query["top_k"] = int(max_results)
-    return query
+        k = min(int(max_results), PUBMED_V6_MAX_K)
+    return {"query": question, "studies": [domain.strip()], "k": k}
 
 
 def build_public_search(rag_result: dict, *, domain, request_id: str, latency_ms: int) -> dict:
-    """Translate RAG's /v1/query (mode="search") response into the frozen
-    public /v1/literature/search response shape: ranked documents, no
-    generated answer."""
-    documents = rag_result.get("documents") or []
+    """Translate RAG v6's /v1/pubmed/search response into the frozen public
+    /v1/literature/search response shape: ranked documents, no generated
+    answer. v6 hits are {pmid, score, studies, title, snippet, year,
+    journal}; the public shape keeps exactly pmid/title/year/score/snippet.
+    `snippet` is now a real excerpt (the docstore's leading part of the
+    abstract), not the full abstract text."""
+    hits = rag_result.get("results") or []
     results = [
         {
-            "pmid": doc.get("pmid"),
-            "title": doc.get("title"),
-            "year": doc.get("year"),
-            "score": doc.get("citation_confidence", doc.get("similarity_score")),
-            # The design doc calls this a "snippet"; RAG only has the full
-            # abstract text to offer, not a separately-generated excerpt,
-            # so that's what's returned under this name rather than
-            # fabricating a truncation.
-            "snippet": doc.get("abstract"),
+            "pmid": hit.get("pmid"),
+            "title": hit.get("title"),
+            "year": hit.get("year"),
+            "score": hit.get("score"),
+            "snippet": hit.get("snippet"),
         }
-        for doc in documents
+        for hit in hits
     ]
     return {
         "id": f"srch_{request_id or uuid.uuid4().hex}",
         "results": results,
-        "domain": rag_result.get("study", domain),
+        # RAG's resolved study name (e.g. "DNA damage response" -> "DNA_damage_response").
+        "domain": (rag_result.get("studies") or [domain])[0],
         "usage": {
             "searches": 1,
             "latency_ms": latency_ms,
