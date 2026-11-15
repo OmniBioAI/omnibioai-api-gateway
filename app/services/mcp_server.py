@@ -67,9 +67,10 @@ def build_mcp_server() -> MCPServer:
 
     @server.tool(
         description="Return ranked PubMed studies relevant to a question, with no generated answer -- "
-                    "retrieval only. Billed per call, at a lower rate than an answer."
+                    "retrieval only. `domain` is required: one name from list_domains. "
+                    "Billed per call, at a lower rate than an answer."
     )
-    async def search_literature(question: str, domain: str = "default") -> dict:
+    async def search_literature(question: str, domain: str) -> dict:
         return await _call_self("/v1/literature/search", "POST", {"question": question, "domain": domain})
 
     @server.tool(description="List the research domains that can be searched. Free.")

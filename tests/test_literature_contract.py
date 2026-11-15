@@ -176,36 +176,47 @@ def test_missing_request_id_still_produces_an_id():
 
 
 # ---------------------------------------------------------------------------
-# build_rag_search_query
+# build_rag_search_query (RAG v6 POST /v1/pubmed/search body, ecosystem#110)
 # ---------------------------------------------------------------------------
 
-def test_search_minimal_request_sets_mode_search():
-    assert build_rag_search_query({"question": "What is TP53?"}) == {
-        "query": "What is TP53?", "study": "default", "mode": "search",
+def test_search_minimal_request_builds_v6_body_with_default_k():
+    assert build_rag_search_query({"question": "What is TP53?", "domain": "Oncology_General"}) == {
+        "query": "What is TP53?", "studies": ["Oncology_General"], "k": 10,
     }
 
 
-def test_search_domain_maps_to_study():
-    assert build_rag_search_query({"question": "q", "domain": "Oncology"})["study"] == "Oncology"
+def test_search_domain_is_stripped_and_passed_as_the_only_study():
+    # Legacy spellings are passed through unchanged: RAG resolves them itself.
+    assert build_rag_search_query({"question": "q", "domain": "  DNA damage response "})["studies"] == [
+        "DNA damage response"]
 
 
-@pytest.mark.parametrize("max_results", [1, 10, 25.0])
-def test_search_max_results_maps_to_top_k(max_results):
-    assert build_rag_search_query({"question": "q", "max_results": max_results})["top_k"] == int(max_results)
+@pytest.mark.parametrize("body", [{"question": "q"}, {"question": "q", "domain": ""},
+                                  {"question": "q", "domain": "   "}, {"question": "q", "domain": ["A"]},
+                                  {"question": "q", "domain": None}])
+def test_search_without_a_domain_is_rejected(body):
+    with pytest.raises(UnsupportedRequestError) as exc:
+        build_rag_search_query(body)
+    assert exc.value.field == "domain"
+
+
+@pytest.mark.parametrize("max_results,k", [(1, 1), (10, 10), (25.0, 25), (50, 50), (51, 50), (1000, 50)])
+def test_search_max_results_maps_to_k_capped_at_50(max_results, k):
+    assert build_rag_search_query({"question": "q", "domain": "A", "max_results": max_results})["k"] == k
 
 
 @pytest.mark.parametrize("max_results", [0, -1, "10", None, True])
-def test_search_invalid_or_absent_max_results_omits_top_k(max_results):
-    body = {"question": "q"}
+def test_search_invalid_or_absent_max_results_uses_default_k(max_results):
+    body = {"question": "q", "domain": "A"}
     if max_results is not None:
         body["max_results"] = max_results
-    assert "top_k" not in build_rag_search_query(body)
+    assert build_rag_search_query(body)["k"] == 10
 
 
 @pytest.mark.parametrize("body", [{}, {"question": ""}, {"question": "   "}, {"question": 5}])
 def test_search_missing_or_blank_question_is_rejected(body):
     with pytest.raises(UnsupportedRequestError) as exc:
-        build_rag_search_query(body)
+        build_rag_search_query({"domain": "A", **body})
     assert exc.value.field == "question"
 
 
@@ -219,42 +230,52 @@ def test_search_non_dict_body_is_rejected():
 def test_search_does_not_reject_answer_only_fields(field):
     # Unlike build_rag_query, search never calls an LLM regardless of
     # these fields, so there is nothing to reject them for.
-    build_rag_search_query({"question": "q", field: "anything-truthy-or-not"})  # must not raise
+    body = build_rag_search_query({"question": "q", "domain": "A", field: "anything-truthy-or-not"})
+    assert set(body) == {"query", "studies", "k"}  # never forwarded
 
 
 # ---------------------------------------------------------------------------
-# build_public_search
+# build_public_search (RAG v6 response -> frozen public shape)
 # ---------------------------------------------------------------------------
 
-def test_search_builds_full_public_shape_from_rag_result():
-    rag_result = {
-        "study": "Oncology", "mode": "search", "summary": None,
-        "documents": [{"pmid": "123", "title": "TP53 review", "year": 2021,
-                        "citation_confidence": 0.9, "abstract": "TP53 is a tumor suppressor."}],
-    }
-    result = build_public_search(rag_result, domain="Oncology", request_id="req-1", latency_ms=7)
+V6_RESULT = {
+    "model": "Qwen/Qwen3-Embedding-4B", "studies": ["DNA_damage_response"], "k": 10,
+    "results": [{"pmid": "38010655", "score": 0.79, "studies": ["DNA_damage_response"],
+                 "title": "BRCA1 review", "snippet": "BRCA1 repairs…", "year": "2023", "journal": "J X"}],
+    "docstore_available": True, "timing_ms": {"embed": 45.0, "search": 9.0, "docstore": 0.3, "total": 55.0},
+}
+
+
+def test_search_builds_full_public_shape_from_v6_result():
+    result = build_public_search(V6_RESULT, domain="DNA damage response", request_id="req-1", latency_ms=7)
     assert result == {
         "id": "srch_req-1",
-        "results": [{"pmid": "123", "title": "TP53 review", "year": 2021, "score": 0.9,
-                     "snippet": "TP53 is a tumor suppressor."}],
-        "domain": "Oncology",
+        "results": [{"pmid": "38010655", "title": "BRCA1 review", "year": "2023", "score": 0.79,
+                     "snippet": "BRCA1 repairs…"}],
+        "domain": "DNA_damage_response",  # RAG's resolved name
         "usage": {"searches": 1, "latency_ms": 7},
     }
 
 
-def test_search_falls_back_to_similarity_score_when_citation_confidence_absent():
-    rag_result = {"documents": [{"pmid": "1", "similarity_score": 0.5}]}
-    result = build_public_search(rag_result, domain=None, request_id="r", latency_ms=1)
+def test_search_does_not_leak_v6_only_fields():
+    (hit,) = build_public_search(V6_RESULT, domain="A", request_id="r", latency_ms=1)["results"]
+    assert set(hit) == {"pmid", "title", "year", "score", "snippet"}
+
+
+def test_search_missing_docstore_fields_are_null():
+    rag_result = {"results": [{"pmid": "1", "score": 0.5, "studies": ["A"],
+                               "title": None, "snippet": None, "year": None, "journal": None}]}
+    result = build_public_search(rag_result, domain="A", request_id="r", latency_ms=1)
     assert result["results"] == [{"pmid": "1", "title": None, "year": None, "score": 0.5, "snippet": None}]
 
 
-def test_search_empty_documents_yields_empty_results():
+def test_search_empty_results_yields_empty_results():
     result = build_public_search({}, domain=None, request_id="r", latency_ms=1)
     assert result["results"] == []
     assert "answer" not in result
 
 
-def test_search_domain_falls_back_to_caller_supplied_value_when_rag_result_has_no_study():
+def test_search_domain_falls_back_to_caller_supplied_value_when_rag_result_has_no_studies():
     result = build_public_search({}, domain="Oncology", request_id="r", latency_ms=1)
     assert result["domain"] == "Oncology"
 

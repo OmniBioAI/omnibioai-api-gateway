@@ -430,7 +430,7 @@ def test_literature_search_has_no_concurrency_cap(client, redis, upstream, monke
     redis.kv["gateway:v1:conc:api_key:7"] = 1_000_000  # would deny /answers outright
 
     headers = {"Authorization": f"Bearer {KEY}"}
-    resp = client.post("/v1/literature/search", json={"question": "q"}, headers=headers)
+    resp = client.post("/v1/literature/search", json={"question": "q", "domain": "A"}, headers=headers)
     assert resp.status_code == 200
 
 
@@ -458,7 +458,7 @@ def test_test_mode_answers_returns_a_canned_response_without_calling_upstream(cl
 def test_test_mode_search_returns_a_canned_response_without_calling_upstream(client, redis, upstream):
     headers = {"Authorization": f"Bearer {KEY}"}
     with patch.object(_main_mod.iam, "validate_api_key", AsyncMock(return_value=TEST_MODE_USER)):
-        resp = client.post("/v1/literature/search", json={"question": "q"}, headers=headers)
+        resp = client.post("/v1/literature/search", json={"question": "q", "domain": "A"}, headers=headers)
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"].startswith("srch_test_")
@@ -610,7 +610,8 @@ def test_byok_search_is_rejected_regardless_of_use_own_key(client, redis, upstre
     """build_rag_search_query never validates model/use_own_key at all
     (search is retrieval-only) -- confirms that stays true after M16."""
     headers = {"Authorization": f"Bearer {KEY}"}
-    resp = client.post("/v1/literature/search", json={"question": "q", "model": "claude", "use_own_key": True},
+    resp = client.post("/v1/literature/search",
+                       json={"question": "q", "domain": "A", "model": "claude", "use_own_key": True},
                        headers=headers)
     assert resp.status_code == 200  # accepted; search never routes through a provider at all
     upstream.assert_called_once()  # only the retrieval-only RAG call, no reveal
@@ -722,11 +723,18 @@ def test_upstream_error_mapping(client, redis, upstream, status, error_type):
     assert _usage(redis) == []
 
 
+V6_STUDIES = {"model": "Qwen/Qwen3-Embedding-4B", "limits": {"max_k": 50},
+              "studies": [{"name": "Oncology_General", "kind": "study", "vector_count": 461609},
+                          {"name": "general_unassigned", "kind": "unassigned", "vector_count": 1437535}]}
+
+
 def test_studies_is_free_and_rate_limited(client, redis, upstream, monkeypatch):
-    upstream.return_value = (200, {"studies": ["Oncology"]})
+    upstream.return_value = (200, V6_STUDIES)
     resp = client.get("/v1/literature/studies", headers={"Authorization": f"Bearer {KEY}"})
-    assert resp.status_code == 200 and resp.json() == {"studies": ["Oncology"]}
-    assert upstream.call_args.kwargs["url"] == "http://rag:8096/v1/studies"
+    assert resp.status_code == 200 and resp.json() == {"studies": [
+        {"name": "Oncology_General", "abstract_count": 461609},
+        {"name": "general_unassigned", "abstract_count": 1437535}]}
+    assert upstream.call_args.kwargs["url"] == "http://rag:8096/v1/pubmed/studies"
     assert _usage(redis) == []
 
     upstream.return_value = (500, {})
@@ -737,11 +745,12 @@ def test_studies_is_free_and_rate_limited(client, redis, upstream, monkeypatch):
 
 
 def test_domains_is_free_and_rate_limited(client, redis, upstream, monkeypatch):
-    upstream.return_value = (200, {"studies": [{"name": "oncology", "abstract_count": 12}]})
+    upstream.return_value = (200, V6_STUDIES)
     resp = client.get("/v1/literature/domains", headers={"Authorization": f"Bearer {KEY}"})
     assert resp.status_code == 200
-    assert resp.json() == {"domains": [{"name": "oncology", "abstract_count": 12}]}
-    assert upstream.call_args.kwargs["url"] == "http://rag:8096/v1/studies"
+    assert resp.json() == {"domains": [{"name": "Oncology_General", "abstract_count": 461609},
+                                       {"name": "general_unassigned", "abstract_count": 1437535}]}
+    assert upstream.call_args.kwargs["url"] == "http://rag:8096/v1/pubmed/studies"
     assert _usage(redis) == []
 
     upstream.return_value = (500, {})
@@ -751,33 +760,118 @@ def test_domains_is_free_and_rate_limited(client, redis, upstream, monkeypatch):
     assert client.get("/v1/literature/domains", headers={"Authorization": f"Bearer {KEY}"}).status_code == 429
 
 
-def test_search_forwards_search_mode_and_bills_search_resource(client, redis, upstream):
+V6_SEARCH = {
+    "model": "Qwen/Qwen3-Embedding-4B", "studies": ["Pancreatic_Cancer"], "k": 10,
+    "results": [{"pmid": "35352018", "score": 0.7943, "studies": ["Pancreatic_Cancer"],
+                 "title": "Pan-KRAS inhibitors suppress proliferation", "snippet": "KRAS is mutated in…",
+                 "year": "2022", "journal": "Oncogene"}],
+    "docstore_available": True, "timing_ms": {"embed": 45.3, "search": 9.4, "docstore": 0.3, "total": 55.5},
+}
+
+
+def _search(client, body=None):
+    return client.post("/v1/literature/search", json={"question": "KRAS inhibitors", "domain": "Pancreatic_Cancer"}
+                       if body is None else body, headers={"Authorization": f"Bearer {KEY}"})
+
+
+def test_search_forwards_to_rag_v6_and_bills_search_resource(client, redis, upstream):
     """/v1/literature/search uses the same billable-call lifecycle as
-    /v1/literature/answers, but bills "literature.search" (not
-    "literature.answer") and tells RAG mode="search" so no LLM is
-    invoked -- the response has no generated answer."""
-    upstream.return_value = (200, {
-        "study": "default", "mode": "search", "summary": None,
-        "documents": [{"pmid": "1", "title": "TP53 review", "year": 2021, "citation_confidence": 0.9,
-                        "abstract": "TP53 is a tumor suppressor."}],
-    })
-    resp = client.post("/v1/literature/search", json={"question": "What does TP53 do?"},
-                        headers={"Authorization": f"Bearer {KEY}"})
+    /v1/literature/answers, bills "literature.search", and is served by
+    RAG v6 POST /v1/pubmed/search (retrieval only, no LLM)."""
+    upstream.return_value = (200, V6_SEARCH)
+    resp = _search(client)
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"].startswith("srch_")
-    assert body["results"] == [{"pmid": "1", "title": "TP53 review", "year": 2021, "score": 0.9,
-                                 "snippet": "TP53 is a tumor suppressor."}]
-    assert body["domain"] == "default"
+    assert body["results"] == [{"pmid": "35352018", "title": "Pan-KRAS inhibitors suppress proliferation",
+                                 "year": "2022", "score": 0.7943, "snippet": "KRAS is mutated in…"}]
+    assert body["domain"] == "Pancreatic_Cancer"
     assert body["usage"]["searches"] == 1
     assert "answer" not in body
 
     kwargs = upstream.call_args.kwargs
     assert kwargs["method"] == "POST"
-    assert kwargs["body"] == {"query": "What does TP53 do?", "study": "default", "mode": "search"}
+    assert kwargs["url"] == "http://rag:8096/v1/pubmed/search"
+    assert kwargs["body"] == {"query": "KRAS inhibitors", "studies": ["Pancreatic_Cancer"], "k": 10}
 
     (event,) = _usage(redis)
     assert event["resource"] == "literature.search"
+
+
+def test_search_forwards_the_callers_own_token_not_a_service_token(client, redis, upstream):
+    """The JWT minted for the caller's API key (USER["access_token"]) is what
+    RAG sees, so RAG's own dataset.read check and per-user rate limit apply
+    to the real caller."""
+    upstream.return_value = (200, V6_SEARCH)
+    _search(client)
+    headers = upstream.call_args.kwargs["headers"]
+    assert headers["Authorization"] == "Bearer minted.jwt.token"
+    assert headers["X-User-Id"] == "5"
+
+
+def test_search_public_response_contract(client, redis, upstream):
+    """Contract test for the frozen public /v1/literature/search shape the
+    Studio Developer page and SDK document: exact top-level keys, exact
+    per-result keys and types, and no RAG v6-only field leaking through."""
+    upstream.return_value = (200, {**V6_SEARCH, "results": V6_SEARCH["results"] * 2})
+    body = _search(client).json()
+    assert set(body) == {"id", "results", "domain", "usage"}
+    assert isinstance(body["id"], str) and body["id"].startswith("srch_")
+    assert isinstance(body["domain"], str)
+    assert set(body["usage"]) == {"searches", "latency_ms"}
+    assert body["usage"]["searches"] == 1 and isinstance(body["usage"]["latency_ms"], int)
+    assert len(body["results"]) == 2
+    for hit in body["results"]:
+        assert set(hit) == {"pmid", "title", "year", "score", "snippet"}
+        assert isinstance(hit["pmid"], str) and isinstance(hit["score"], float)
+        assert isinstance(hit["title"], str) and isinstance(hit["snippet"], str)
+
+
+def test_search_legacy_domain_name_is_passed_through_and_resolved_name_returned(client, redis, upstream):
+    upstream.return_value = (200, {**V6_SEARCH, "studies": ["DNA_damage_response"]})
+    resp = _search(client, {"question": "q", "domain": "DNA damage response", "max_results": 500})
+    assert upstream.call_args.kwargs["body"] == {"query": "q", "studies": ["DNA damage response"], "k": 50}
+    assert resp.json()["domain"] == "DNA_damage_response"
+
+
+def test_search_without_domain_is_rejected_before_quota_or_upstream(client, redis, upstream):
+    with patch.object(v1.store, "reserve_quota", AsyncMock(return_value=True)) as reserve:
+        resp = _search(client, {"question": "q"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["detail"]["field"] == "domain"
+    upstream.assert_not_called()
+    reserve.assert_not_called()
+    assert _usage(redis) == []
+
+
+def test_search_unknown_domain_is_invalid_request_and_not_billed(client, redis, upstream):
+    upstream.return_value = (400, {"detail": {"error": "unknown_study", "studies": ["Nope"]}})
+    with patch.object(v1.store, "release_quota", AsyncMock()) as release:
+        resp = _search(client, {"question": "q", "domain": "Nope"})
+    assert resp.status_code == 400
+    error = resp.json()["error"]
+    assert error["type"] == "invalid_request"
+    assert error["detail"] == {"detail": {"error": "unknown_study", "studies": ["Nope"]}}
+    release.assert_awaited_once()
+    assert _usage(redis) == []
+
+
+def test_search_rag_rate_limit_maps_to_429_and_is_not_billed(client, redis, upstream):
+    upstream.return_value = (429, {"detail": "Rate limit exceeded"})
+    with patch.object(v1.store, "release_quota", AsyncMock()) as release:
+        resp = _search(client)
+    assert resp.status_code == 429
+    assert resp.json()["error"]["type"] == "rate_limited"
+    assert resp.headers["Retry-After"] == "60"
+    release.assert_awaited_once()
+    assert _usage(redis) == []
+
+
+def test_answers_still_use_rag_v1_query(client, redis, upstream):
+    """/answers needs a generated answer, which RAG v6 doesn't provide yet:
+    it stays on the legacy /v1/query path (ecosystem#110 follow-up)."""
+    _post(client)
+    assert upstream.call_args.kwargs["url"] == "http://rag:8096/v1/query"
 
 
 def test_search_rejects_missing_question(client, redis, upstream):
@@ -789,7 +883,7 @@ def test_search_rejects_missing_question(client, redis, upstream):
 
 def test_search_quota_exceeded(client, redis, upstream):
     with patch.object(v1.store, "reserve_quota", AsyncMock(return_value=False)):
-        resp = client.post("/v1/literature/search", json={"question": "q"},
+        resp = client.post("/v1/literature/search", json={"question": "q", "domain": "A"},
                             headers={"Authorization": f"Bearer {KEY}"})
     assert resp.status_code == 402
     assert resp.json()["error"]["type"] == "quota_exceeded"

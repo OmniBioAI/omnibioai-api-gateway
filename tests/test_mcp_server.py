@@ -31,6 +31,12 @@ def test_build_mcp_server_registers_the_three_tools():
     assert names == {"answer_with_citations", "search_literature", "list_domains"}
 
 
+def test_search_literature_requires_a_domain():
+    # RAG v6 has no "default" study: the tool must not invent one.
+    tools = {t.name: t for t in asyncio.run(build_mcp_server().list_tools())}
+    assert set(tools["search_literature"].input_schema["required"]) == {"question", "domain"}
+
+
 class TestCallSelf:
     def test_forwards_the_api_key_as_a_bearer_token(self):
         forward = AsyncMock(return_value=(200, {"answer": "ok"}))
