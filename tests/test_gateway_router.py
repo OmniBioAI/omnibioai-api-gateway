@@ -505,3 +505,41 @@ def test_legitimate_non_reserved_headers_still_pass_through(client, valid_user):
     # under that lowercase key unchanged (unlike the reserved ones,
     # which the gateway re-sets itself under their canonical casing).
     assert headers.get("x-request-purpose") == "integration-test"
+
+
+def test_workbench_biorepo_internal_paths_are_never_forwarded(client, valid_user):
+    """Workbench's service-to-service BioRepository ownership check is not part
+    of the public API: the gateway answers 404 itself and never calls the proxy,
+    for every spelling of the path."""
+    forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", forward),
+    ):
+        for path in (
+            "/workbench/api/biorepo/v1/internal/ownership/1",
+            "/workbench/api/biorepo/v1/internal",
+            "/workbench/api/biorepo/v1/./internal/ownership/1",
+            "/workbench/api/biorepo//v1/internal/ownership/1",
+            "/workbench/api/biorepo/v1/search/../internal/ownership/1",
+        ):
+            for method in ("get", "post"):
+                resp = getattr(client, method)(path, headers={"Authorization": "Bearer token"})
+                assert resp.status_code == 404, (method, path)
+                assert resp.json() == {"error": "not found"}
+        forward.assert_not_awaited()
+
+
+def test_other_biorepo_paths_are_still_forwarded(client, valid_user):
+    forward = AsyncMock(return_value=(200, {"ok": True}))
+    with (
+        patch.object(_main_mod.iam, "validate", AsyncMock(return_value=valid_user)),
+        patch.object(_main_mod.policy, "evaluate", AsyncMock(return_value={"allowed": True})),
+        patch.object(_main_mod.hpc, "evaluate", AsyncMock(return_value={"allow": True})),
+        patch("app.routes.gateway.proxy.forward", forward),
+    ):
+        for path in ("/workbench/api/biorepo/v1/search", "/workbench/api/biorepo/v1/internalx"):
+            assert client.get(path, headers={"Authorization": "Bearer token"}).status_code == 200
+    assert forward.await_count == 2
