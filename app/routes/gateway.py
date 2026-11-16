@@ -9,6 +9,7 @@ Author:
 """
 
 import asyncio
+import posixpath
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -101,8 +102,26 @@ def build_upstream_headers(request: Request) -> dict:
     return upstream_headers
 
 
+# Service-to-service endpoints the gateway must never forward, whatever the
+# caller's token: Workbench's BioRepository ownership check is called by Auth
+# directly on workbench:8000 (Workbench docs/biorepo/DESIGN.md). Matched on the
+# normalized path, so "./", "//" and ".." spellings can't slip past.
+_NEVER_FORWARDED = {
+    "workbench": ("/api/biorepo/v1/internal",),
+}
+
+
+def _never_forwarded(service: str, path: str) -> bool:
+    normalized = posixpath.normpath("/" + path)
+    return any(normalized == prefix or normalized.startswith(prefix + "/")
+               for prefix in _NEVER_FORWARDED.get(service, ()))
+
+
 @router.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def gateway(service: str, path: str, request: Request):
+    if _never_forwarded(service, path):
+        return JSONResponse(content={"error": "not found"}, status_code=404)
+
     target = resolve_service(service)
 
     if not target:
